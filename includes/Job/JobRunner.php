@@ -49,6 +49,12 @@ use WpPcloudBackup\Zip\ZipWriter;
  *   warnings           string[] Warnings found after the scan (the scan's own are in scanner.warnings).
  *   db_sha1, db_sha256, db_size  Hashes and size of database.sql.gz.
  *   db_uploaded, manifest_uploaded, renamed  bool  Idempotent finalize sub-steps.
+ *   finished_at        int      Completion time used by the report.
+ *   pruned, history_added, last_success_saved, notified, reported  bool  Report sub-steps (each at most once).
+ *
+ * Settings written: last_scheduled (slot of a scheduled job), next_run (next slot; 0 = compute
+ * from start_time; the admin page resets it to 0 when schedule or start_time change),
+ * last_success, last_stale_notice. runner.lock is never deleted.
  */
 final class JobRunner {
 
@@ -169,10 +175,10 @@ final class JobRunner {
 	 * @param History          $h     Run history.
 	 * @param \wpdb            $wpdb  Database access object.
 	 * @param callable|null    $clock fn(): int, defaults to time().
-	 * @param \DateTimeZone    $tz    Site timezone, defaults to UTC.
+	 * @param \DateTimeZone|null $tz  Site timezone, defaults to UTC.
 	 * @param array            $env   Overrides for site_url, home_url, wp_version, plugin_version, abspath.
 	 */
-	public function __construct( Settings $s, WorkDir $w, StorageInterface $st, Notifier $n, History $h, $wpdb, callable $clock = null, \DateTimeZone $tz = null, array $env = array() ) {
+	public function __construct( Settings $s, WorkDir $w, StorageInterface $st, Notifier $n, History $h, $wpdb, ?callable $clock = null, ?\DateTimeZone $tz = null, array $env = array() ) {
 		$this->settings = $s;
 		$this->workDir  = $w;
 		$this->storage  = $st;
@@ -185,7 +191,10 @@ final class JobRunner {
 	}
 
 	/**
-	 * Cron entry point: send a stale notice if due, start a job when a slot is due, run the job.
+	 * Cron entry point: send a stale notice if due, start a job when next_run is due, run the job.
+	 *
+	 * The schedule lives in the next_run setting. After a scheduled job starts, next_run moves
+	 * to the first grid slot after now (slots missed while nothing ran are not replayed).
 	 */
 	public function tick(): array {
 		$now = $this->now();
@@ -195,12 +204,24 @@ final class JobRunner {
 			return $this->run();
 		}
 
-		$slot = $this->dueSlot( $now );
-		if ( null !== $slot && $this->startJob( 'schedule', $slot ) ) {
+		$slot = $this->nextRunAt( $now );
+		if ( $slot <= $now && $this->startJob( 'schedule', $slot ) ) {
+			$this->settings->update( array( 'next_run' => $this->gridAfter( $slot, $now ) ) );
 			return $this->run();
 		}
 
 		return $this->status();
+	}
+
+	/**
+	 * Time of the next scheduled job (epoch), for the admin page.
+	 *
+	 * When next_run is 0 (fresh install, or reset by the admin page after schedule or
+	 * start_time changed, see Task 16) it is computed as the next start time + site
+	 * offset after now and stored.
+	 */
+	public function nextRun(): int {
+		return $this->nextRunAt( $this->now() );
 	}
 
 	/**
@@ -217,7 +238,7 @@ final class JobRunner {
 			return false;
 		}
 
-		$this->deleteJobFiles( false );
+		$this->deleteJobFiles();
 
 		$now = $this->now();
 		JobState::create(
@@ -278,7 +299,8 @@ final class JobRunner {
 			$this->state->save();
 			$tracked = true;
 
-			if ( (int) $this->state->get( 'started', $now ) + self::MAX_JOB_SECONDS < $now ) {
+			// Once the manifest is uploaded the generation is complete: never time it out.
+			if ( ! $this->state->get( 'manifest_uploaded' ) && (int) $this->state->get( 'started', $now ) + self::MAX_JOB_SECONDS < $now ) {
 				$this->abort( 'timeout' );
 				return $this->status();
 			}
@@ -382,9 +404,12 @@ final class JobRunner {
 		$attempts = (int) ( ( (array) $state->get( 'attempts', array() ) )[ $step ] ?? 0 );
 		$folder   = $state->get( 'incomplete_id' );
 
+		// Never delete a completed generation: after the rename the folder id points at it.
 		if ( null !== $folder && ! $state->get( 'renamed' ) ) {
 			try {
-				$this->storage->deleteFolder( (int) $folder );
+				if ( ! $this->renameAlreadyDone( $state ) ) {
+					$this->storage->deleteFolder( (int) $folder );
+				}
 			} catch ( \Throwable $e ) {
 				// Retention removes stale .incomplete folders later.
 				unset( $e );
@@ -405,7 +430,7 @@ final class JobRunner {
 				)
 			);
 		} finally {
-			$this->deleteJobFiles( true );
+			$this->deleteJobFiles();
 			$this->state = null;
 
 			if ( null !== $this->lock ) {
@@ -459,7 +484,7 @@ final class JobRunner {
 			case 'finalize':
 				return $this->stepFinalize();
 			case 'cleanup':
-				$this->deleteJobFiles( true );
+				$this->deleteJobFiles();
 				$this->state = null;
 				return true;
 		}
@@ -489,7 +514,10 @@ final class JobRunner {
 		$permanent = $error instanceof StorageException
 			&& ( ! $error->isRetryable() || in_array( $error->category(), array( 'auth', 'quota' ), true ) );
 
-		if ( $permanent || $attempts[ $step ] >= self::MAX_ATTEMPTS ) {
+		// After the rename the generation is complete: keep retrying, never fail the job.
+		$complete = 'finalize' === $step && $this->state->get( 'renamed' );
+
+		if ( ! $complete && ( $permanent || $attempts[ $step ] >= self::MAX_ATTEMPTS ) ) {
 			$this->abort( $message );
 			return;
 		}
@@ -609,6 +637,11 @@ final class JobRunner {
 		clearstatcache();
 		$gzSize = is_file( $gz ) ? (int) filesize( $gz ) : 0;
 		if ( 'compress' === ( $db['phase'] ?? '' ) && ! is_file( $sql ) && ( (int) ( $db['compress_offset'] ?? 0 ) > 0 || $gzSize > 0 ) ) {
+			// Accept the gzip only if it holds the whole dump; a SQL file lost any other way
+			// leaves a prefix, which fails here (retried, then the job aborts).
+			if ( $this->gzipPlainBytes( $gz ) !== (int) ( $db['sql_bytes'] ?? -1 ) ) {
+				throw new \RuntimeException( 'database.sql is missing and database.sql.gz does not hold the whole dump.' );
+			}
 			$db['phase']    = 'done';
 			$db['gz_bytes'] = $gzSize;
 			$this->state->set( 'db', $db );
@@ -803,6 +836,8 @@ final class JobRunner {
 		}
 
 		if ( ! $this->state->get( 'manifest_uploaded' ) ) {
+			$this->assertAllPartsUploaded();
+
 			try {
 				$json = Manifest::build( $this->manifestInput() );
 			} catch ( \RuntimeException $e ) {
@@ -825,18 +860,27 @@ final class JobRunner {
 			$this->state->save();
 		}
 
-		$warnings = $this->allWarnings();
-		try {
-			( new Retention( $this->storage, (int) $this->state->get( 'site_folder_id' ) ) )->prune( (int) $this->settings->get( 'keep' ), $this->now() );
-		} catch ( StorageException $e ) {
-			// The backup itself is complete; old generations are retried next time.
-			$warnings[] = 'retention failed: ' . $e->getMessage();
+		if ( ! $this->state->get( 'reported' ) ) {
+			$this->report();
+			$this->state->set( 'reported', true );
+			$this->state->save();
 		}
 
-		$this->report( $warnings );
 		$this->advance( 'cleanup' );
 
 		return true;
+	}
+
+	/**
+	 * @throws \RuntimeException When a part is still pending or unfinished (retried by the failure policy).
+	 */
+	private function assertAllPartsUploaded(): void {
+		$sink  = new PartWriter( $this->workDir->path(), self::PARTS_BASE, $this->settings->partSizeBytes(), (array) $this->state->get( 'parts', array() ) );
+		$parts = $sink->completedParts();
+
+		if ( array() === $parts || array() !== $sink->pendingUploads() || 0 !== (int) $sink->state()['current_size'] ) {
+			throw new \RuntimeException( 'Not every archive part has been uploaded.' );
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -865,67 +909,112 @@ final class JobRunner {
 		try {
 			$this->storage->renameFolder( $incompleteId, $stamp );
 		} catch ( StorageException $e ) {
-			foreach ( $this->storage->listFolder( (int) $this->state->get( 'site_folder_id' ) ) as $item ) {
-				if ( ! empty( $item['isfolder'] ) && $stamp === (string) $item['name'] && ! $this->hasIncompleteFolder() ) {
-					return;
-				}
+			if ( ! $this->renameAlreadyDone( $this->state ) ) {
+				throw $e;
 			}
-			throw $e;
 		}
 	}
 
 	/**
-	 * Whether the .incomplete folder of this job still exists remotely.
+	 * Whether the remote site folder holds {stamp} and no longer holds .incomplete-{stamp}.
 	 */
-	private function hasIncompleteFolder(): bool {
-		$name = '.incomplete-' . $this->state->get( 'stamp' );
-		foreach ( $this->storage->listFolder( (int) $this->state->get( 'site_folder_id' ) ) as $item ) {
-			if ( ! empty( $item['isfolder'] ) && $name === (string) $item['name'] ) {
-				return true;
+	private function renameAlreadyDone( JobState $state ): bool {
+		$stamp      = (string) $state->get( 'stamp' );
+		$renamed    = false;
+		$incomplete = false;
+
+		foreach ( $this->storage->listFolder( (int) $state->get( 'site_folder_id' ) ) as $item ) {
+			if ( empty( $item['isfolder'] ) ) {
+				continue;
 			}
+			$renamed    = $renamed || $stamp === (string) $item['name'];
+			$incomplete = $incomplete || '.incomplete-' . $stamp === (string) $item['name'];
 		}
 
-		return false;
+		return $renamed && ! $incomplete;
 	}
 
 	/**
-	 * History entry, completion mail, last_success.
-	 *
-	 * @param string[] $warnings
+	 * Prune, history entry, last_success, completion mail: each runs at most once (flag saved
+	 * right after it). A failure becomes a warning in the state and never fails the job.
 	 */
-	private function report( array $warnings ): void {
-		$now     = $this->now();
-		$started = (int) $this->state->get( 'started', $now );
-		$files   = (int) ( ( (array) $this->state->get( 'zip', array() ) )['entries'] ?? 0 );
-		$remote  = $this->siteFolderPath() . '/' . $this->state->get( 'stamp' );
-		$bytes   = (int) $this->state->get( 'db_size', 0 );
+	private function report(): void {
+		if ( null === $this->state->get( 'finished_at' ) ) {
+			$this->state->set( 'finished_at', $this->now() );
+			$this->state->save();
+		}
+
+		$finished = (int) $this->state->get( 'finished_at' );
+		$started  = (int) $this->state->get( 'started', $finished );
+		$files    = (int) ( ( (array) $this->state->get( 'zip', array() ) )['entries'] ?? 0 );
+		$remote   = $this->siteFolderPath() . '/' . $this->state->get( 'stamp' );
+		$bytes    = (int) $this->state->get( 'db_size', 0 );
 		foreach ( $this->completedParts() as $part ) {
 			$bytes += (int) $part['size'];
 		}
 
-		$this->history->add(
-			array(
-				'started'  => $started,
-				'finished' => $now,
-				'result'   => array() === $warnings ? 'success' : 'warning',
-				'bytes'    => $bytes,
-				'files'    => $files,
-				'remote'   => $remote,
-				'message'  => array() === $warnings ? '' : count( $warnings ) . ' warning(s)',
-			)
-		);
-
-		$this->notifier->completed(
-			array(
-				'bytes'    => $bytes,
-				'files'    => $files,
-				'duration' => $now - $started,
-				'remote'   => $remote,
+		$tasks = array(
+			'pruned'             => array(
+				'retention',
+				function () use ( $finished ): void {
+					( new Retention( $this->storage, (int) $this->state->get( 'site_folder_id' ) ) )->prune( (int) $this->settings->get( 'keep' ), $finished );
+				},
 			),
-			$warnings
+			'history_added'      => array(
+				'history',
+				function () use ( $started, $finished, $bytes, $files, $remote ): void {
+					$warnings = $this->allWarnings();
+					$this->history->add(
+						array(
+							'started'  => $started,
+							'finished' => $finished,
+							'result'   => array() === $warnings ? 'success' : 'warning',
+							'bytes'    => $bytes,
+							'files'    => $files,
+							'remote'   => $remote,
+							'message'  => array() === $warnings ? '' : count( $warnings ) . ' warning(s)',
+						)
+					);
+				},
+			),
+			'last_success_saved' => array(
+				'last_success',
+				function () use ( $finished ): void {
+					$this->settings->update( array( 'last_success' => $finished ) );
+				},
+			),
+			'notified'           => array(
+				'notification',
+				function () use ( $started, $finished, $bytes, $files, $remote ): void {
+					$this->notifier->completed(
+						array(
+							'bytes'    => $bytes,
+							'files'    => $files,
+							'duration' => $finished - $started,
+							'remote'   => $remote,
+						),
+						$this->allWarnings()
+					);
+				},
+			),
 		);
 
-		$this->settings->update( array( 'last_success' => $now ) );
+		foreach ( $tasks as $flag => list( $label, $task ) ) {
+			if ( $this->state->get( $flag ) ) {
+				continue;
+			}
+
+			try {
+				$task();
+			} catch ( \Throwable $e ) {
+				$warnings   = (array) $this->state->get( 'warnings', array() );
+				$warnings[] = $label . ' failed: ' . $e->getMessage();
+				$this->state->set( 'warnings', $warnings );
+			}
+
+			$this->state->set( $flag, true );
+			$this->state->save();
+		}
 	}
 
 	private function manifestInput(): array {
@@ -943,7 +1032,17 @@ final class JobRunner {
 			'abspath'        => $this->envValue( 'abspath' ),
 			'files_count'    => (int) ( ( (array) $this->state->get( 'zip', array() ) )['entries'] ?? 0 ),
 			'files_bytes'    => (int) $this->state->get( 'zip_bytes', 0 ),
-			'parts'          => $this->completedParts(),
+			'parts'          => array_map(
+				static function ( array $part ): array {
+					return array(
+						'name'   => (string) $part['name'],
+						'size'   => (int) $part['size'],
+						'sha1'   => (string) $part['sha1'],
+						'sha256' => (string) $part['sha256'],
+					);
+				},
+				$this->completedParts()
+			),
 			'database'       => array(
 				'tables' => (array) ( $db['tables'] ?? array() ),
 				'rows'   => (int) ( $db['rows'] ?? 0 ),
@@ -974,33 +1073,28 @@ final class JobRunner {
 	}
 
 	/**
-	 * The schedule slot to start now, or null. Slots missed while nothing ran are not replayed:
-	 * the latest slot at or before $now is returned.
-	 *
-	 * Without a previous slot the grid is anchored at the latest start time + offset
-	 * (stored as last_scheduled) and nothing starts; the first scheduled job runs one period later.
+	 * Stored next_run, computed and stored first when it is 0.
 	 */
-	private function dueSlot( int $now ): ?int {
-		$schedule = (string) $this->settings->get( 'schedule' );
-		$start    = (string) $this->settings->get( 'start_time' );
-		$offset   = Scheduler::offsetMinutes( (string) $this->settings->get( 'site_folder' ) );
-		$last     = (int) $this->settings->get( 'last_scheduled' );
+	private function nextRunAt( int $now ): int {
+		$next = (int) $this->settings->get( 'next_run' );
 
-		if ( $last <= 0 ) {
-			$anchor = Scheduler::nextRun( $schedule, $start, $offset, null, $now - 86400, $this->tz );
-			$this->settings->update( array( 'last_scheduled' => $anchor ) );
-
-			return null;
+		if ( $next <= 0 ) {
+			$next = Scheduler::nextRun( (string) $this->settings->get( 'schedule' ), (string) $this->settings->get( 'start_time' ), $this->siteOffset(), null, $now, $this->tz );
+			$this->settings->update( array( 'next_run' => $next ) );
 		}
 
-		$slot = null;
-		$next = Scheduler::nextRun( $schedule, $start, $offset, $last, $last, $this->tz );
-		while ( $next <= $now ) {
-			$slot = $next;
-			$next = Scheduler::nextRun( $schedule, $start, $offset, $next, $next, $this->tz );
-		}
+		return $next;
+	}
 
-		return $slot;
+	/**
+	 * First grid slot after $now, counting periods from $slot.
+	 */
+	private function gridAfter( int $slot, int $now ): int {
+		return Scheduler::nextRun( (string) $this->settings->get( 'schedule' ), (string) $this->settings->get( 'start_time' ), $this->siteOffset(), $slot, $now, $this->tz );
+	}
+
+	private function siteOffset(): int {
+		return Scheduler::offsetMinutes( (string) $this->settings->get( 'site_folder' ) );
 	}
 
 	private function maybeNotifyStale( int $now ): void {
@@ -1033,11 +1127,10 @@ final class JobRunner {
 	}
 
 	/**
-	 * Delete the job's files in the work directory; state.json goes last so a crash mid-way is re-cleaned.
-	 *
-	 * @param bool $withLock Also delete runner.lock.
+	 * Delete the job's files in the work directory; state.json goes last so a crash mid-way is
+	 * re-cleaned. runner.lock is kept: deleting a lock file other processes may open breaks flock.
 	 */
-	private function deleteJobFiles( bool $withLock ): void {
+	private function deleteJobFiles(): void {
 		try {
 			$dir = $this->workDir->path();
 		} catch ( \RuntimeException $e ) {
@@ -1048,10 +1141,6 @@ final class JobRunner {
 		foreach ( array( self::LIST_FILE, self::CENTRAL_FILE, self::SQL_FILE, self::GZ_FILE, self::MANIFEST_FILE, self::STATE_FILE . '.tmp', self::STATE_FILE ) as $name ) {
 			$files[] = $dir . '/' . $name;
 		}
-		if ( $withLock ) {
-			$files[] = $dir . '/' . self::LOCK_FILE;
-		}
-
 		foreach ( $files as $file ) {
 			if ( is_file( $file ) ) {
 				@unlink( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
@@ -1104,6 +1193,36 @@ final class JobRunner {
 		}
 
 		return $excludes;
+	}
+
+	/**
+	 * Uncompressed size of a (possibly multi-member) gzip file, read in 1 MiB chunks.
+	 *
+	 * @throws \RuntimeException If the file cannot be read.
+	 */
+	private function gzipPlainBytes( string $file ): int {
+		$handle = @gzopen( $file, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		if ( false === $handle ) {
+			throw new \RuntimeException( 'Cannot open database.sql.gz.' );
+		}
+
+		$bytes = 0;
+		try {
+			while ( ! gzeof( $handle ) ) {
+				$chunk = gzread( $handle, 1048576 );
+				if ( false === $chunk ) {
+					throw new \RuntimeException( 'Cannot read database.sql.gz.' );
+				}
+				if ( '' === $chunk ) {
+					break;
+				}
+				$bytes += strlen( $chunk );
+			}
+		} finally {
+			gzclose( $handle );
+		}
+
+		return $bytes;
 	}
 
 	private function truncateFile( string $path, int $size ): void {

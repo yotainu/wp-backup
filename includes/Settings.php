@@ -32,6 +32,7 @@ class Settings {
 		'last_scheduled',
 		'last_success',
 		'last_stale_notice',
+		'next_run',
 	);
 
 	public const SCHEDULES = array( 'daily', 'every3days', 'weekly', 'biweekly', 'monthly' );
@@ -52,7 +53,7 @@ class Settings {
 	/**
 	 * Keys that hold UNIX timestamps.
 	 */
-	private const TIMESTAMP_KEYS = array( 'last_scheduled', 'last_success', 'last_stale_notice' );
+	private const TIMESTAMP_KEYS = array( 'last_scheduled', 'last_success', 'last_stale_notice', 'next_run' );
 
 	/**
 	 * Keys that hold booleans.
@@ -97,6 +98,7 @@ class Settings {
 			'last_scheduled'    => 0,
 			'last_success'      => 0,
 			'last_stale_notice' => 0,
+			'next_run'          => 0,
 		);
 	}
 

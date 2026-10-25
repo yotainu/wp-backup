@@ -92,6 +92,7 @@ final class SettingsTest extends TestCase {
 		$this->assertContains( 'wp-content/ai1wm-backups', $d['excludes'] );
 		$this->assertContains( '.git', $d['excludes'] );
 		$this->assertContains( 'node_modules', $d['excludes'] );
+		$this->assertSame( 0, $d['next_run'] );
 		$this->assertSame( Settings::KEYS, array_keys( $d ) );
 	}
 

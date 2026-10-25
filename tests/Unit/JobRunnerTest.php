@@ -189,6 +189,11 @@ final class JobRunnerTest extends TestCase {
 
 	protected function tearDown(): void {
 		TempDir::remove( $this->base );
+		// PHPUnit keeps every test case alive until the end: drop the big fixtures.
+		$this->files    = array();
+		$this->values   = null;
+		$this->settings = null;
+		$this->workDir  = null;
 		Monkey\tearDown();
 		parent::tearDown();
 	}
@@ -257,8 +262,8 @@ final class JobRunnerTest extends TestCase {
 	private function wpdb( array $tables = null ): FakeWpdb {
 		return new FakeWpdb(
 			$tables ?? array(
-				'wp_options' => $this->table( 'wp_options', 30 ),
-				'wp_posts'   => $this->table( 'wp_posts', 12 ),
+				'wp_comments' => $this->table( 'wp_comments', 30 ),
+				'wp_posts'    => $this->table( 'wp_posts', 12 ),
 			)
 		);
 	}
@@ -387,19 +392,23 @@ final class JobRunnerTest extends TestCase {
 	}
 
 	/**
-	 * Job files left in the work directory (everything but .htaccess and index.php).
+	 * Job files left in the work directory (everything but .htaccess, index.php and the kept runner.lock).
 	 *
 	 * @return string[]
 	 */
 	private function leftoverJobFiles(): array {
-		return array_values( array_diff( scandir( $this->workDir->path() ), array( '.', '..', '.htaccess', 'index.php' ) ) );
+		return array_values( array_diff( scandir( $this->workDir->path() ), array( '.', '..', '.htaccess', 'index.php', 'runner.lock' ) ) );
 	}
 
 	/**
 	 * Storage decorator delegating to LocalStorage, with a hook on uploadFile.
 	 */
-	private function decoratedStorage( callable $onUpload ): StorageInterface {
-		return new class( new LocalStorage( $this->remote ), $onUpload ) implements StorageInterface {
+	/**
+	 * @param callable      $onUpload fn( string $name ): void, called before each upload.
+	 * @param callable|null $onRename fn( StorageInterface $inner, int $id, string $name ): void, replaces renameFolder.
+	 */
+	private function decoratedStorage( callable $onUpload, ?callable $onRename = null ): StorageInterface {
+		return new class( new LocalStorage( $this->remote ), $onUpload, $onRename ) implements StorageInterface {
 			/**
 			 * @var StorageInterface
 			 */
@@ -410,9 +419,15 @@ final class JobRunnerTest extends TestCase {
 			 */
 			private $onUpload;
 
-			public function __construct( StorageInterface $inner, callable $onUpload ) {
+			/**
+			 * @var callable|null
+			 */
+			private $onRename;
+
+			public function __construct( StorageInterface $inner, callable $onUpload, ?callable $onRename ) {
 				$this->inner    = $inner;
 				$this->onUpload = $onUpload;
+				$this->onRename = $onRename;
 			}
 
 			public function ensureFolder( string $path ): int {
@@ -429,6 +444,10 @@ final class JobRunnerTest extends TestCase {
 			}
 
 			public function renameFolder( int $folderId, string $newName ): void {
+				if ( null !== $this->onRename ) {
+					( $this->onRename )( $this->inner, $folderId, $newName );
+					return;
+				}
 				$this->inner->renameFolder( $folderId, $newName );
 			}
 
@@ -497,7 +516,7 @@ final class JobRunnerTest extends TestCase {
 		$this->assertSame( count( $this->files ), $manifest['files_count'] );
 		$this->assertSame( array_sum( array_map( 'strlen', $this->files ) ), $manifest['files_bytes'] );
 		$this->assertSame( array(), $manifest['warnings'] );
-		$this->assertSame( array( 'wp_options', 'wp_posts' ), $manifest['database']['tables'] );
+		$this->assertSame( array( 'wp_comments', 'wp_posts' ), $manifest['database']['tables'] );
 		$this->assertSame( 42, $manifest['database']['rows'] );
 		$this->assertSame( sha1_file( $generation . '/database.sql.gz' ), $manifest['database']['sha1'] );
 		$this->assertSame( 'https://example.com', $manifest['site_url'] );
@@ -511,18 +530,20 @@ final class JobRunnerTest extends TestCase {
 
 		$sql = gzdecode( (string) file_get_contents( $generation . '/database.sql.gz' ) );
 		$this->assertStringContainsString( 'CREATE TABLE `wp_posts`', $sql );
-		$this->assertStringContainsString( "(30, 'wp_options-30')", $sql );
+		$this->assertStringContainsString( "(30, 'wp_comments-30')", $sql );
 
 		$history = ( new History() )->all();
 		$this->assertCount( 1, $history );
 		$this->assertSame( 'success', $history[0]['result'] );
 		$this->assertSame( count( $this->files ), $history[0]['files'] );
+		$this->assertArrayNotHasKey( 'path', $manifest['parts'][0], 'local paths stay out of the manifest' );
 		$this->assertSame( '/WPBackup/example.com/' . basename( $generation ), $history[0]['remote'] );
 
 		$this->assertSame( array(), $this->mails, 'no mail for a clean success when notify_on_success is off' );
 		$this->assertGreaterThan( 0, $this->values['last_success'] );
 		$this->assertSame( 0, $this->values['last_scheduled'], 'a manual job does not move the schedule' );
 		$this->assertSame( array(), $this->leftoverJobFiles() );
+		$this->assertFileExists( $this->workDir->path( 'runner.lock' ), 'the lock file is never deleted' );
 	}
 
 	public function test_each_run_respects_budget_except_upload(): void {
@@ -719,46 +740,76 @@ final class JobRunnerTest extends TestCase {
 		$this->assertSame( $this->now, $this->readState()['last_run_started'] );
 	}
 
-	public function test_tick_starts_job_when_due_and_sends_stale_notice(): void {
-		$tz     = new \DateTimeZone( 'Asia/Tokyo' );
-		$offset = Scheduler::offsetMinutes( 'example.com' );
-		$runner = $this->runner();
+	public function test_tick_on_fresh_install_sets_next_run_and_starts_nothing(): void {
+		$runner     = $this->runner();
 		$this->tick = 0;
 
-		// Never scheduled before: the grid is anchored, nothing starts yet.
 		$status = $runner->tick();
-		$this->assertFalse( $status['running'] );
-		$anchor = $this->values['last_scheduled'];
-		$this->assertGreaterThan( $this->now - 86400, $anchor );
-		$this->assertLessThanOrEqual( $this->now, $anchor );
-		$this->assertSame( $anchor, Scheduler::nextRun( 'daily', '03:00', $offset, null, $anchor - 1, $tz ), 'anchor is a grid slot' );
-		$this->assertSame( array(), $this->mails );
 
-		// Three slots missed and the last success is four days old.
-		$this->values['last_scheduled'] = $anchor - 3 * 86400;
+		$expected = Scheduler::nextRun( 'daily', '03:00', Scheduler::offsetMinutes( 'example.com' ), null, $this->now, new \DateTimeZone( 'Asia/Tokyo' ) );
+		$this->assertFalse( $status['running'] );
+		$this->assertSame( $expected, $this->values['next_run'], 'next start time + offset' );
+		$this->assertGreaterThan( $this->now, $this->values['next_run'] );
+		$this->assertSame( $expected, $runner->nextRun() );
+		$this->assertSame( 0, $this->values['last_scheduled'] );
+		$this->assertSame( array(), $this->mails );
+	}
+
+	public function test_tick_starts_job_when_due_and_sends_stale_notice(): void {
+		$tz         = new \DateTimeZone( 'Asia/Tokyo' );
+		$offset     = Scheduler::offsetMinutes( 'example.com' );
+		$runner     = $this->runner();
+		$this->tick = 0;
+
+		$slot                           = $this->now - 60;
+		$this->values['next_run']       = $slot;
 		$this->values['last_success']   = $this->now - 4 * 86400;
 
 		$status = $runner->tick();
-		$this->assertTrue( $status['running'], 'a due slot starts a job' );
-		$this->assertSame( 'schedule', $this->readState()['trigger'] );
-		$this->assertSame( $anchor, $this->values['last_scheduled'], 'the latest due slot is recorded, missed slots are not replayed' );
+		$this->assertTrue( $status['running'], 'a due next_run starts a job' );
 		$this->assertNotSame( 'prepare', $status['step'], 'tick ran the first run' );
+		$state = $this->readState();
+		$this->assertSame( 'schedule', $state['trigger'] );
+		$this->assertSame( $slot, $state['slot'] );
+		$this->assertSame( $slot, $this->values['last_scheduled'] );
+		$this->assertSame( Scheduler::nextRun( 'daily', '03:00', $offset, $slot, $this->now, $tz ), $this->values['next_run'] );
+		$this->assertGreaterThan( $this->now, $this->values['next_run'] );
 
 		$this->assertCount( 1, $this->mails );
 		$this->assertStringContainsString( '停止中', $this->mails[0][1] );
 		$this->assertStringContainsString( 'バックアップが周期の2倍以上成功していません', $this->mails[0][2] );
 		$this->assertSame( $this->now, $this->values['last_stale_notice'] );
 
-		// Within 24 h: no second stale notice; the running job just advances.
+		// Within 24 h: no second stale notice, and the running job is continued, not restarted.
 		$this->now += 3600;
 		$runner->tick();
 		$this->assertCount( 1, $this->mails );
+		$this->assertSame( $state['started'], $this->readState()['started'] );
 
 		// Next day, still stale: one more notice.
 		$this->now += 86400;
 		$runner->tick();
 		$this->assertCount( 2, $this->mails );
 		$this->assertStringContainsString( '停止中', $this->mails[1][1] );
+	}
+
+	public function test_tick_overdue_by_days_starts_exactly_one_job(): void {
+		$tz     = new \DateTimeZone( 'Asia/Tokyo' );
+		$offset = Scheduler::offsetMinutes( 'example.com' );
+		$runner = $this->runner();
+
+		$slot                     = Scheduler::nextRun( 'daily', '03:00', $offset, null, $this->now - 3 * 86400, $tz );
+		$this->values['next_run'] = $slot;
+
+		$this->assertTrue( $runner->tick()['running'] );
+		$this->assertSame( $slot, $this->values['last_scheduled'] );
+		$this->assertGreaterThan( $this->now, $this->values['next_run'], 'missed slots are skipped' );
+		$this->assertLessThanOrEqual( $this->now + 86400, $this->values['next_run'] );
+
+		$this->runToEnd( $runner );
+		$this->assertFalse( $runner->tick()['running'], 'nothing is due any more' );
+		$this->assertCount( 1, ( new History() )->all() );
+		$this->assertCount( 1, $this->remoteFolders() );
 	}
 
 	public function test_crash_mid_entry_is_truncated_on_resume(): void {
@@ -812,6 +863,169 @@ final class JobRunnerTest extends TestCase {
 		$this->runToEnd( $runner );
 
 		$this->assertArchiveMatches( $this->onlyGeneration(), $this->files );
+	}
+
+	public function test_report_is_not_repeated_after_a_crash_in_the_mail(): void {
+		$this->values['notify_on_success'] = true;
+		$snapshot                          = $this->base . '/state-at-mail.json';
+		$failed                            = false;
+		Functions\when( 'wp_mail' )->alias(
+			function ( $to, $subject, $message ) use ( $snapshot, &$failed ) {
+				if ( ! $failed ) {
+					// The process "dies" here: keep the state as it was at this moment.
+					$failed = true;
+					copy( $this->stateFile(), $snapshot );
+					throw new \RuntimeException( 'smtp down' );
+				}
+				$this->mails[] = array( $to, $subject, $message );
+				return true;
+			}
+		);
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+
+		$this->runToEnd( $runner );
+		$this->assertTrue( $failed );
+		$this->assertSame( array(), $this->mails, 'no failure mail for a complete generation' );
+		$this->assertCount( 1, ( new History() )->all() );
+		$this->assertSame( 'success', ( new History() )->all()[0]['result'] );
+		$this->assertGreaterThan( 0, $this->values['last_success'] );
+
+		// Resume from the state saved just before the mail, as after a real crash.
+		copy( $snapshot, $this->stateFile() );
+		$this->now += self::BUDGET * 3;
+		$this->runToEnd( $runner );
+
+		$this->assertCount( 1, ( new History() )->all(), 'the history entry is not repeated' );
+		$this->assertCount( 1, $this->mails, 'only the missing mail is sent' );
+		$this->assertStringContainsString( '完了', $this->mails[0][1] );
+		$this->assertFalse( $runner->status()['running'] );
+		$this->assertArchiveMatches( $this->onlyGeneration(), $this->files );
+	}
+
+	/**
+	 * Run until the job reaches the zip step, then rewind it to compress with database.sql gone.
+	 */
+	private function rewindToCompressWithoutSql( JobRunner $runner ): void {
+		for ( $i = 0; $i < self::MAX_RUNS && 'zip' !== $this->readState()['step']; $i++ ) {
+			$runner->run();
+		}
+		$state = $this->readState();
+		$this->assertSame( 'zip', $state['step'] );
+		$this->assertFileDoesNotExist( $this->workDir->path( 'database.sql' ) );
+
+		$state['step']                  = 'compress';
+		$state['db']['phase']           = 'compress';
+		$state['db']['compress_offset'] = $state['db']['sql_bytes'];
+		$this->writeState( $state );
+	}
+
+	public function test_compress_shortcut_accepts_a_complete_gzip(): void {
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+		$this->rewindToCompressWithoutSql( $runner );
+
+		$this->runToEnd( $runner );
+
+		$this->assertSame( 'success', ( new History() )->all()[0]['result'] );
+		$generation = $this->onlyGeneration();
+		$this->assertStringContainsString( 'CREATE TABLE `wp_posts`', gzdecode( (string) file_get_contents( $generation . '/database.sql.gz' ) ) );
+		$this->assertArchiveMatches( $generation, $this->files );
+	}
+
+	public function test_compress_shortcut_rejects_a_truncated_gzip(): void {
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+		$this->rewindToCompressWithoutSql( $runner );
+		file_put_contents( $this->workDir->path( 'database.sql.gz' ), gzencode( "-- WP pCloud Backup SQL dump\n" ) );
+
+		$this->runToEnd( $runner );
+
+		$history = ( new History() )->all();
+		$this->assertSame( 'failed', $history[0]['result'], 'retried, then aborted' );
+		$this->assertStringContainsString( 'does not hold the whole dump', $history[0]['message'] );
+		$this->assertSame( array(), $this->remoteFolders() );
+	}
+
+	public function test_deadline_is_ignored_once_the_manifest_is_uploaded(): void {
+		$renames = 0;
+		$storage = $this->decoratedStorage(
+			static function () {
+			},
+			static function ( StorageInterface $inner, int $id, string $name ) use ( &$renames ) {
+				if ( 1 === ++$renames ) {
+					throw new StorageException( 'timeout', 0, true, 'network' );
+				}
+				$inner->renameFolder( $id, $name );
+			}
+		);
+		$runner  = $this->runner( $storage );
+		$runner->startJob( 'manual' );
+
+		for ( $i = 0; $i < self::MAX_RUNS && empty( $this->readState()['manifest_uploaded'] ); $i++ ) {
+			$runner->run();
+		}
+		$this->assertSame( 'finalize', $this->readState()['step'] );
+
+		$this->now += 172800 + 60;
+		$this->runToEnd( $runner );
+
+		$this->assertSame( 2, $renames );
+		$this->assertSame( 'success', ( new History() )->all()[0]['result'] );
+		$this->assertArchiveMatches( $this->onlyGeneration(), $this->files );
+	}
+
+	public function test_abort_after_an_unrecorded_rename_keeps_the_generation(): void {
+		$storage = $this->decoratedStorage(
+			static function () {
+			},
+			static function ( StorageInterface $inner, int $id, string $name ) {
+				$inner->renameFolder( $id, $name );
+				throw new \RuntimeException( 'died right after the rename' );
+			}
+		);
+		$runner  = $this->runner( $storage );
+		$runner->startJob( 'manual' );
+
+		for ( $i = 0; $i < self::MAX_RUNS && null === $this->readState()['last_error']; $i++ ) {
+			$runner->run();
+		}
+		$this->assertSame( 'finalize', $this->readState()['step'] );
+		$this->assertEmpty( $this->readState()['renamed'] ?? null );
+
+		$runner->abort( 'cancelled' );
+
+		$this->assertSame( 'failed', ( new History() )->all()[0]['result'] );
+		$this->assertArchiveMatches( $this->onlyGeneration(), $this->files );
+	}
+
+	public function test_finalize_requires_every_part_uploaded(): void {
+		$dbUploads = 0;
+		$storage   = $this->decoratedStorage(
+			static function ( string $name ) use ( &$dbUploads ) {
+				if ( 'database.sql.gz' === $name && 1 === ++$dbUploads ) {
+					throw new StorageException( 'timeout', 0, true, 'network' );
+				}
+			}
+		);
+		$runner    = $this->runner( $storage );
+		$runner->startJob( 'manual' );
+
+		for ( $i = 0; $i < self::MAX_RUNS && 0 === $dbUploads; $i++ ) {
+			$runner->run();
+		}
+		$state = $this->readState();
+		$this->assertSame( 'finalize', $state['step'] );
+
+		$state['parts']['parts'][0]['uploaded'] = false;
+		$this->writeState( $state );
+
+		$this->runToEnd( $runner );
+
+		$history = ( new History() )->all();
+		$this->assertSame( 'failed', $history[0]['result'] );
+		$this->assertSame( 'Not every archive part has been uploaded.', $history[0]['message'] );
+		$this->assertSame( array(), $this->remoteFolders(), 'no manifest, no rename: the .incomplete folder is removed' );
 	}
 
 	public function test_dump_without_tables_aborts(): void {
