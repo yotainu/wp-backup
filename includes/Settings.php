@@ -73,7 +73,7 @@ class Settings {
 			'access_token_enc'  => '',
 			'root_folder'       => '/WPBackup',
 			'site_folder'       => $this->sanitizeSiteFolder( is_string( $host ) ? $host : '', 'site' ),
-			'backup_root'       => rtrim( ABSPATH, '/' ),
+			'backup_root'       => BackupRoot::detect( ABSPATH, (string) site_url(), (string) home_url() ),
 			'schedule'          => 'weekly',
 			'start_time'        => '03:00',
 			'keep'              => 3,
@@ -230,8 +230,7 @@ class Settings {
 			case 'site_folder':
 				return $this->sanitizeSiteFolder( (string) $value, $default );
 			case 'backup_root':
-				// Task 4: validate with BackupRoot::validate().
-				return rtrim( sanitize_text_field( (string) $value ), '/' );
+				return $this->sanitizeBackupRoot( (string) $value, $default );
 			case 'excludes':
 				return $this->sanitizeExcludes( $value );
 			default:
@@ -249,6 +248,12 @@ class Settings {
 		}
 
 		return implode( ',', $valid );
+	}
+
+	private function sanitizeBackupRoot( string $value, string $default ): string {
+		$path = BackupRoot::normalize( sanitize_text_field( $value ) );
+
+		return BackupRoot::validate( $path, $default, ABSPATH ) ? $path : $default;
 	}
 
 	private function sanitizeRootFolder( string $value, string $default ): string {

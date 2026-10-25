@@ -52,6 +52,7 @@ final class SettingsTest extends TestCase {
 		);
 		Functions\when( 'wp_cache_delete' )->justReturn( true );
 		Functions\when( 'home_url' )->justReturn( 'https://example.com/blog' );
+		Functions\when( 'site_url' )->justReturn( 'https://example.com/blog' );
 		Functions\when( 'sanitize_email' )->alias(
 			function ( $email ) {
 				return false === filter_var( $email, FILTER_VALIDATE_EMAIL ) ? '' : $email;
@@ -145,7 +146,28 @@ final class SettingsTest extends TestCase {
 		$this->assertFalse( $result['use_wp_cron'] );
 		$this->assertFalse( $result['auto_update'] );
 		$this->assertSame( '/WPBackup', $settings->update( array( 'root_folder' => ' / ' ) )['root_folder'] );
-		$this->assertSame( '/var/www/html', $settings->update( array( 'backup_root' => '/var/www/html/' ) )['backup_root'] );
+		$this->assertSame(
+			rtrim( ABSPATH, '/' ),
+			$settings->update( array( 'backup_root' => ABSPATH ) )['backup_root']
+		);
+	}
+
+	public function test_default_backup_root_goes_up_when_wordpress_is_in_subdir(): void {
+		Functions\when( 'site_url' )->justReturn( 'https://example.com/blog/wp' );
+
+		$expected = dirname( rtrim( ABSPATH, '/' ) );
+
+		$this->assertSame( $expected, ( new Settings() )->defaults()['backup_root'] );
+		$this->assertSame( $expected, ( new Settings() )->get( 'backup_root' ) );
+	}
+
+	public function test_update_rejects_backup_root_outside_allowed_range(): void {
+		$settings = new Settings();
+		$default  = rtrim( ABSPATH, '/' );
+
+		$this->assertSame( $default, $settings->update( array( 'backup_root' => '/etc' ) )['backup_root'] );
+		$this->assertSame( $default, $settings->update( array( 'backup_root' => ABSPATH . '/../..' ) )['backup_root'] );
+		$this->assertSame( $default, $settings->get( 'backup_root' ) );
 	}
 
 	public function test_update_persists_merged_array_with_autoload(): void {
