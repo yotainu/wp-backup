@@ -1,0 +1,17 @@
+.git
+.gitignore
+.distignore
+.superpowers
+.phpunit.result.cache
+.wp-env.json
+.wp-env.override.json
+.DS_Store
+tests
+bin
+docs
+build
+vendor
+node_modules
+composer.json
+composer.lock
+phpunit.xml.dist
