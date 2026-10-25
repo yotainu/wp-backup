@@ -360,7 +360,8 @@ final class DbDumperTest extends TestCase {
 			$done   = $dumper->compress( $this->stopNow() );
 			$state  = $dumper->state();
 			++$runs;
-			$this->assertLessThan( 10, $runs );
+			// Brain Monkey's Patchwork stream wrapper (active once any earlier test used it) caps fread() at 8 KiB, so allow many runs.
+			$this->assertLessThan( 1000, $runs );
 		} while ( ! $done );
 
 		$this->assertGreaterThanOrEqual( 3, $runs );

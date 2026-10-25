@@ -86,7 +86,11 @@ final class Plugin {
 
 		$plugin->trigger()->register();
 
-		// Task 16 hooks the admin screen here; Task 17 hooks the updater here.
+		if ( is_admin() ) {
+			( new Admin\AdminPage( $plugin ) )->register();
+		}
+
+		// Task 17 hooks the updater here.
 	}
 
 	/**

@@ -1,0 +1,47 @@
+.wppb-progress {
+	height: 20px;
+	max-width: 480px;
+	background: #dcdcde;
+	border-radius: 3px;
+	overflow: hidden;
+}
+
+.wppb-progress > div {
+	height: 100%;
+	background: #2271b1;
+	transition: width 0.4s ease;
+}
+
+.wppb-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 12px 0;
+}
+
+.wppb-inline-form {
+	display: inline-block;
+	margin: 0;
+}
+
+.wppb-inline-form[hidden] {
+	display: none;
+}
+
+.wppb-error {
+	color: #b32d2e;
+}
+
+.wppb-history,
+.wppb-diagnostics {
+	margin-top: 8px;
+}
+
+.wppb-diag-ok {
+	color: #1a7f37;
+}
+
+.wppb-diag-ng {
+	color: #b32d2e;
+	font-weight: 600;
+}

@@ -190,6 +190,14 @@ final class SettingsTest extends TestCase {
 		$this->assertSame( '', $settings->get( 'access_token_enc' ) );
 	}
 
+	public function test_connection_email_is_a_sanitized_setting_defaulting_to_empty(): void {
+		$settings = new Settings();
+
+		$this->assertSame( '', $settings->get( 'connection_email' ) );
+		$this->assertSame( 'me@example.com', $settings->update( array( 'connection_email' => 'me@example.com' ) )['connection_email'] );
+		$this->assertSame( '', $settings->update( array( 'connection_email' => 'not an email' ) )['connection_email'] );
+	}
+
 	public function test_part_size_bytes(): void {
 		$settings = new Settings();
 		$this->assertSame( 25 * 1048576, $settings->partSizeBytes() );

@@ -33,6 +33,7 @@ class Settings {
 		'last_success',
 		'last_stale_notice',
 		'next_run',
+		'connection_email',
 	);
 
 	public const SCHEDULES = array( 'daily', 'every3days', 'weekly', 'biweekly', 'monthly' );
@@ -99,6 +100,7 @@ class Settings {
 			'last_success'      => 0,
 			'last_stale_notice' => 0,
 			'next_run'          => 0,
+			'connection_email'  => '',
 		);
 	}
 
@@ -227,6 +229,8 @@ class Settings {
 				return min( 120, max( 5, (int) $value ) );
 			case 'notify_email':
 				return $this->sanitizeEmails( (string) $value );
+			case 'connection_email':
+				return sanitize_email( (string) $value );
 			case 'root_folder':
 				return $this->sanitizeRootFolder( (string) $value, $default );
 			case 'site_folder':
