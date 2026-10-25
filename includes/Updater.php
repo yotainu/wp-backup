@@ -2,8 +2,6 @@
 
 namespace WpPcloudBackup;
 
-use WpPcloudBackup\Storage\HttpTransportInterface;
-
 /**
  * Self-hosted updater: reads update.json from GitHub and plugs into the
  * WordPress plugin update flow. Packages are verified against a published
@@ -11,21 +9,20 @@ use WpPcloudBackup\Storage\HttpTransportInterface;
  *
  * Nothing in here may throw into WordPress' update machinery.
  */
-final class Updater {
+class Updater {
 
 	private const TRANSIENT = 'wp_pcloud_backup_update_manifest';
 
+	private const NOTIFIED_TRANSIENT = 'wp_pcloud_backup_update_fail_notified';
+
 	private const TIMEOUT = 15;
+
+	private const REDIRECTION = 5;
 
 	/**
 	 * @var Settings
 	 */
 	private $settings;
-
-	/**
-	 * @var HttpTransportInterface
-	 */
-	private $http;
 
 	/**
 	 * @var string
@@ -59,7 +56,6 @@ final class Updater {
 
 	public function __construct(
 		Settings $settings,
-		HttpTransportInterface $http,
 		string $updateUrl,
 		string $pluginBasename,
 		string $currentVersion,
@@ -67,7 +63,6 @@ final class Updater {
 		Notifier $notifier
 	) {
 		$this->settings       = $settings;
-		$this->http           = $http;
 		$this->updateUrl      = $updateUrl;
 		$this->pluginBasename = $pluginBasename;
 		$this->slug           = dirname( $pluginBasename );
@@ -97,29 +92,17 @@ final class Updater {
 			}
 		}
 
-		try {
-			$headers = array( 'Accept' => 'application/json' );
-			if ( defined( 'WP_PCLOUD_BACKUP_GITHUB_TOKEN' ) && '' !== (string) WP_PCLOUD_BACKUP_GITHUB_TOKEN ) {
-				$headers['Authorization'] = 'token ' . WP_PCLOUD_BACKUP_GITHUB_TOKEN;
-			}
+		$headers = array( 'Accept' => 'application/json' );
+		if ( defined( 'WP_PCLOUD_BACKUP_GITHUB_TOKEN' ) && '' !== (string) WP_PCLOUD_BACKUP_GITHUB_TOKEN ) {
+			$headers['Authorization'] = 'token ' . WP_PCLOUD_BACKUP_GITHUB_TOKEN;
+		}
 
-			$response = $this->http->request(
-				'GET',
-				$this->updateUrl,
-				array(
-					'headers' => $headers,
-					'timeout' => self::TIMEOUT,
-				)
-			);
-		} catch ( \Throwable $e ) {
+		$response = $this->httpGet( $this->updateUrl, $headers );
+		if ( null === $response || 200 !== $response['status'] ) {
 			return null;
 		}
 
-		if ( 200 !== (int) ( $response['status'] ?? 0 ) ) {
-			return null;
-		}
-
-		$data = json_decode( (string) ( $response['body'] ?? '' ), true );
+		$data = json_decode( $response['body'], true );
 		if ( ! is_array( $data ) ) {
 			return null;
 		}
@@ -162,6 +145,7 @@ final class Updater {
 			'tested'        => $manifest['tested'] ?? '',
 			'icons'         => array(),
 			'banners'       => array(),
+			'banners_rtl'   => array(),
 			'compatibility' => new \stdClass(),
 		);
 
@@ -226,7 +210,15 @@ final class Updater {
 	 */
 	public function shouldAutoUpdate( $update, $item ) {
 		if ( is_object( $item ) && isset( $item->plugin ) && $item->plugin === $this->pluginBasename ) {
-			return (bool) $this->settings->get( 'auto_update' ) && ! (bool) ( $this->jobRunning )();
+			if ( ! (bool) $this->settings->get( 'auto_update' ) ) {
+				return false;
+			}
+
+			try {
+				return ! (bool) ( $this->jobRunning )();
+			} catch ( \Throwable $e ) {
+				return false; // Unknown job state: assume running, do not update.
+			}
 		}
 
 		return $update;
@@ -235,42 +227,48 @@ final class Updater {
 	/**
 	 * Filter upgrader_pre_download: download our package ourselves and check its SHA-256.
 	 *
+	 * Fails closed: for this plugin every problem (no checksum, mismatch, bad URL) is a
+	 * WP_Error, never an unverified install.
+	 *
 	 * @param mixed  $reply
 	 * @param string $package
 	 * @param mixed  $upgrader
 	 * @param array  $hookExtra
-	 * @return mixed String path of the verified file, WP_Error, or $reply untouched.
+	 * @return mixed String path of the verified file, WP_Error, or $reply untouched for other plugins.
 	 */
 	public function verifyPackage( $reply, $package, $upgrader = null, $hookExtra = array() ) {
-		$manifest = $this->fetchManifest();
-		if ( null === $manifest || $package !== $manifest['download_url'] ) {
+		if ( ! is_array( $hookExtra ) || ( $hookExtra['plugin'] ?? '' ) !== $this->pluginBasename ) {
 			return $reply;
 		}
+
+		if ( ! is_string( $package ) || 0 !== stripos( $package, 'https://' ) ) {
+			return $this->verificationFailed( null, 'wp_pcloud_backup_checksum_unavailable', $this->unavailableMessage() );
+		}
+
+		$manifest    = $this->fetchManifest();
+		$checksumUrl = null !== $manifest && $manifest['download_url'] === $package ? $manifest['sha256_url'] : $package . '.sha256';
 
 		$tmp = download_url( $package, 300 );
 		if ( is_wp_error( $tmp ) ) {
 			return $tmp;
 		}
+		$tmp = (string) $tmp;
 
-		$expected = $this->fetchChecksum( $manifest['sha256_url'] );
-		$actual   = is_string( $tmp ) && is_file( $tmp ) ? hash_file( 'sha256', $tmp ) : false;
-
-		if ( null !== $expected && is_string( $actual ) && hash_equals( $expected, strtolower( $actual ) ) ) {
-			return $tmp;
+		$expected = $this->fetchChecksum( $checksumUrl );
+		if ( null === $expected ) {
+			return $this->verificationFailed( $tmp, 'wp_pcloud_backup_checksum_unavailable', $this->unavailableMessage() );
 		}
 
-		if ( is_string( $tmp ) ) {
-			@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.unlink_unlink
+		$actual = is_file( $tmp ) ? hash_file( 'sha256', $tmp ) : false;
+		if ( ! is_string( $actual ) || ! hash_equals( $expected, strtolower( $actual ) ) ) {
+			return $this->verificationFailed(
+				$tmp,
+				'wp_pcloud_backup_bad_checksum',
+				__( '更新パッケージの検証に失敗しました（SHA-256 不一致）', 'wp-pcloud-backup' )
+			);
 		}
 
-		$message = __( '更新パッケージの検証に失敗しました（SHA-256 不一致）', 'wp-pcloud-backup' );
-		try {
-			$this->notifier->updateFailed( $message );
-		} catch ( \Throwable $e ) {
-			unset( $e ); // A failed mail must not hide the checksum error.
-		}
-
-		return new \WP_Error( 'wp_pcloud_backup_bad_checksum', $message );
+		return $tmp;
 	}
 
 	/**
@@ -313,21 +311,66 @@ final class Updater {
 	 * First 64 hex characters of the published checksum file (lowercase), or null.
 	 */
 	private function fetchChecksum( string $url ): ?string {
-		try {
-			$response = $this->http->request( 'GET', $url, array( 'timeout' => self::TIMEOUT ) );
-		} catch ( \Throwable $e ) {
+		$response = $this->httpGet( $url );
+		if ( null === $response || 200 !== $response['status'] ) {
 			return null;
 		}
 
-		if ( 200 !== (int) ( $response['status'] ?? 0 ) ) {
-			return null;
-		}
-
-		if ( 1 !== preg_match( '/^[0-9a-f]{64}/i', trim( (string) ( $response['body'] ?? '' ) ), $match ) ) {
+		if ( 1 !== preg_match( '/^[0-9a-f]{64}/i', trim( $response['body'] ), $match ) ) {
 			return null;
 		}
 
 		return strtolower( $match[0] );
+	}
+
+	private function unavailableMessage(): string {
+		return __( '更新パッケージの検証用チェックサムを取得できませんでした', 'wp-pcloud-backup' );
+	}
+
+	/**
+	 * Remove the temporary download, send one (throttled) mail and build the error.
+	 */
+	private function verificationFailed( ?string $tmp, string $code, string $message ): \WP_Error {
+		if ( null !== $tmp ) {
+			@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.unlink_unlink
+		}
+
+		if ( false === get_site_transient( self::NOTIFIED_TRANSIENT ) ) {
+			try {
+				$this->notifier->updateFailed( $message );
+			} catch ( \Throwable $e ) {
+				unset( $e ); // A failed mail must not hide the verification error.
+			}
+			set_site_transient( self::NOTIFIED_TRANSIENT, 1, 6 * HOUR_IN_SECONDS );
+		}
+
+		return new \WP_Error( $code, $message );
+	}
+
+	/**
+	 * GET through the WordPress HTTP API (follows redirects, which GitHub release downloads need).
+	 * Seam for tests.
+	 *
+	 * @param array<string,string> $headers
+	 * @return array{status:int,body:string}|null Null on transport failure.
+	 */
+	protected function httpGet( string $url, array $headers = array() ): ?array {
+		$response = wp_remote_get(
+			$url,
+			array(
+				'timeout'     => self::TIMEOUT,
+				'redirection' => self::REDIRECTION,
+				'headers'     => $headers,
+			)
+		);
+		if ( is_wp_error( $response ) ) {
+			return null;
+		}
+
+		return array(
+			'status' => (int) wp_remote_retrieve_response_code( $response ),
+			'body'   => (string) wp_remote_retrieve_body( $response ),
+		);
 	}
 
 	private function isValidManifest( array $data ): bool {

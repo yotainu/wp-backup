@@ -93,7 +93,6 @@ final class Plugin {
 		// Registered in every context: auto-updates run from WP-Cron.
 		( new Updater(
 			$plugin->settings(),
-			new CurlTransport(),
 			WP_PCLOUD_BACKUP_UPDATE_URL,
 			plugin_basename( WP_PCLOUD_BACKUP_FILE ),
 			WP_PCLOUD_BACKUP_VERSION,
