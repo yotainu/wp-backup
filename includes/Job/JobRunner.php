@@ -451,14 +451,16 @@ final class JobRunner {
 	 * Fail the job: delete the remote .incomplete folder, notify, record history, delete job files.
 	 *
 	 * Outside a run the lock is taken first; if another run holds it, nothing happens.
+	 *
+	 * @return bool True when the job was aborted; false when there is no job or a run holds the lock.
 	 */
-	public function abort( string $reason ): void {
+	public function abort( string $reason ): bool {
 		$state = $this->state;
 
 		if ( null === $state ) {
 			$state = $this->loadState();
 			if ( null === $state || ! $state->acquireLock( $this->file( self::LOCK_FILE ) ) ) {
-				return;
+				return false;
 			}
 			$this->lock = $state;
 		}
@@ -501,6 +503,8 @@ final class JobRunner {
 				$this->lock = null;
 			}
 		}
+
+		return true;
 	}
 
 	/**

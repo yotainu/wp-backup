@@ -319,7 +319,11 @@ class AdminPage {
 
 		$runner = $this->runner();
 		if ( null !== $runner && ! empty( $runner->status()['running'] ) ) {
-			$runner->abort( __( '管理画面から中止', 'wp-pcloud-backup' ) );
+			if ( ! $runner->abort( __( '管理画面から中止', 'wp-pcloud-backup' ) ) ) {
+				// A run holds the lock (it is uploading a part, for example).
+				$this->finish( 'status', 'error', __( '実行中のため中止できませんでした。少し待って再試行してください', 'wp-pcloud-backup' ) );
+				return;
+			}
 			$this->finish( 'status', 'success', __( 'バックアップを中止しました。', 'wp-pcloud-backup' ) );
 			return;
 		}

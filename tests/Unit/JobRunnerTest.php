@@ -1465,4 +1465,21 @@ final class JobRunnerTest extends TestCase {
 		$this->assertSame( Scheduler::nextRun( 'daily', '03:00', Scheduler::offsetMinutes( 'example.com' ), $slot, $this->now, new \DateTimeZone( 'Asia/Tokyo' ) ), $this->values['next_run'] );
 		$this->assertGreaterThan( $this->now, $this->values['next_run'] );
 	}
+	public function test_abort_returns_false_while_a_run_holds_the_lock(): void {
+		$runner = $this->runner();
+		$this->assertFalse( $runner->abort( 'nothing to abort' ), 'no job' );
+
+		$runner->startJob( 'manual' );
+		$other = JobState::load( $this->stateFile() );
+		$this->assertTrue( $other->acquireLock( $this->workDir->path( 'runner.lock' ) ) );
+
+		$this->assertFalse( $runner->abort( 'cancelled' ) );
+		$this->assertFileExists( $this->stateFile(), 'the job is untouched' );
+		$this->assertSame( array(), ( new History() )->all() );
+
+		$other->releaseLock();
+		$this->assertTrue( $runner->abort( 'cancelled' ) );
+		$this->assertFileDoesNotExist( $this->stateFile() );
+		$this->assertSame( 'cancelled', ( new History() )->all()[0]['message'] );
+	}
 }

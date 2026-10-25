@@ -119,8 +119,12 @@ class FakeAdminRunner {
 		return 1700000000;
 	}
 
-	public function abort( string $reason ): void {
+	/** @var bool What abort() returns (false: a run holds the lock). */
+	public $abortResult = true;
+
+	public function abort( string $reason ): bool {
 		$this->aborted[] = $reason;
+		return $this->abortResult;
 	}
 }
 
@@ -673,6 +677,18 @@ final class AdminPageTest extends TestCase {
 		$page->handleAbort();
 		$this->assertCount( 1, $runner->aborted );
 		$this->assertSame( 'success', $this->notice()['type'] );
+	}
+
+	public function test_abort_reports_a_held_lock(): void {
+		$runner              = new FakeAdminRunner();
+		$runner->running     = true;
+		$runner->abortResult = false;
+
+		$this->page( $this->plugin( new ArrayBackedSettings() ), array( 'runner' => $runner ) )->handleAbort();
+
+		$this->assertCount( 1, $runner->aborted );
+		$this->assertSame( 'error', $this->notice()['type'] );
+		$this->assertSame( '実行中のため中止できませんでした。少し待って再試行してください', $this->notice()['message'] );
 	}
 
 	// === rendering ===
