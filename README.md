@@ -44,7 +44,7 @@ WordPress サイトのファイルとデータベースを、定期的に pCloud
 - PHP 7.4 以上（`zlib`、`curl`、`openssl` 拡張が必要。足りない場合は有効化時にエラーで止まり、不足している項目が表示されます）
 - pCloud アカウント（米国リージョンは `api.pcloud.com`、EU リージョンは `eapi.pcloud.com`）
 - 想定サーバー: heteml、さくらのレンタルサーバー（どちらも共用サーバーで動作）
-- 約 40GB を超える大規模サイト（VPS など）はこのプラグインの対象外です。
+- 約 40GB を超える大規模サイト（VPS など）はこのプラグインの対象外です。40GB は、外部 cron を 1 分ごとに呼び出せて、pCloud への上り速度が 1MB/s 程度以上ある場合の目安です（[処理の速さの目安](#処理の速さの目安)）。
 
 ### 検証済み環境
 
@@ -66,19 +66,18 @@ WordPress サイトのファイルとデータベースを、定期的に pCloud
 
 | 確認項目 | 結果 |
 |---|---|
-| 外部 cron URL だけで最後まで完走（約 100MB のフィクスチャ、サイト全体 6,690 ファイル / 254MB） | 確認済み（7 パート、8 回の呼び出し、約 30 秒） |
+| 外部 cron URL だけで最後まで完走（約 100MB のフィクスチャ、サイト全体 6,690 ファイル / 254MB、7 パート） | 確認済み（約 30 秒） |
 | 管理画面の「今すぐバックアップ」（AJAX）で進捗バーが進み、完走する | 確認済み（約 35 秒） |
 | 保存先に `manifest.json`、`database.sql.gz`、`files.zip.001…` が揃い、`.incomplete-` が残らない。各パートの sha256 が manifest と一致 | 確認済み |
 | 復元リハーサル: パートを番号順に結合 → `unzip -t` → 展開して元の `uploads` と `diff -r` が一致 | 確認済み（差分なし） |
-| 復元リハーサル: `database.sql.gz` を別の WordPress（wp-env の tests 環境）に `wp db import` し、テーブル数（12）と各テーブルの行数が一致 | 確認済み |
-| 中断・再開: 実行中に WordPress のコンテナを `docker kill`（ZIP 作成中とアップロード中の 2 回）→ 起動し直して呼び出しを続けると、続きから完走し、アーカイブも正常 | 確認済み（中断のたびに約 60 秒〔1 回の実行時間 × 3〕待ってから再開） |
+| 復元リハーサル: バックアップ前に開発環境へ目印の投稿（`WPPB-SENTINEL-<時刻>`）とオプション（`wppb_sentinel`）を作り、`database.sql.gz` を別の WordPress（wp-env の tests 環境）に `wp db import` すると、目印の投稿とオプションが現れ、`wp_options` の `siteurl` / `home` が開発環境の値（`http://localhost:8888`）になる | 確認済み |
+| 中断・再開: 実行中に WordPress のコンテナを `docker kill`（ZIP 作成中とアップロード中の 2 回）→ 起動し直して呼び出しを続けると、続きから完走し、アーカイブも正常（約 3GB のフィクスチャ） | 確認済み（中断のたびに約 60 秒〔1 回の実行時間 × 3〕待ってから再開） |
 | 外部 cron URL: 鍵が違う / 鍵なし → HTTP 403、正しい鍵 → HTTP 200 + JSON | 確認済み |
-| 約 3GB のフィクスチャ（サイト全体 10,082 ファイル / 3.07GiB） | 確認済み（120 パート、115 回の呼び出し、約 6 分 20 秒。2〜3 秒間隔で呼び出した場合） |
+| 約 3GB のフィクスチャ（サイト全体 10,086 ファイル / 3.07GiB、120 パート）。WP-Cron を OFF にし、外部 cron URL だけで実行 | 確認済み（8 回の呼び出しで完走。1 回あたり約 22 秒・約 15 パート、合計約 2 分 40 秒。保存先が同じマシンのフォルダなので、ネットワークの待ち時間は含まない） |
 | 保持世代数（3）を超えた古い世代の削除 | 確認済み |
 | `WP_DEBUG_LOG` 有効時に、このプラグインによる notice / warning が出ない | 確認済み |
 | pCloud への実際のアップロード（`CurlTransport`） | **未確認**（下の「開発」の「pCloud 実機での確認手順」を参照） |
 
-1 回の呼び出し（WP-Cron の 1 回、外部 cron URL の 1 回）で pCloud に送るパートは 1 つです。そのため所要時間は「パート数 × 呼び出し間隔」が目安になります。上の 3GB（120 パート）の場合、外部 cron を 5 分ごとに呼ぶと約 10 時間かかります。
 
 ## 導入手順
 
@@ -88,7 +87,7 @@ WordPress サイトのファイルとデータベースを、定期的に pCloud
 2. 各サイトの `wp-config.php` に `WP_PCLOUD_BACKUP_ACCESS_TOKEN` と `WP_PCLOUD_BACKUP_NOTIFY_EMAIL` を書きます（SSH が使える heteml ではこれが最速です。さくらは FTP またはファイルマネージャで編集します。管理画面の「接続」タブから貼り付けても構いません）。
 3. プラグインの zip をアップロードして有効化します（WP-CLI が使えるなら `wp plugin install <zip の URL> --activate`）。以後の更新は自動です。
 4. 周期や世代数を変えたいサイトだけ、管理画面（設定 → pCloud Backup）で変更します。
-5. 外部 cron を使うサイト（さくらなど）は「WP-Cron で自動実行する」を OFF にして、外部 cron 用 URL をコントロールパネルに 5 分ごとで登録します（後述）。
+5. 外部 cron を使うサイト（さくらなど）は「WP-Cron で自動実行する」を OFF にして、外部 cron 用 URL をコントロールパネルに 1 分ごと（選べる最短の間隔）で登録します（後述）。
 6. 「今すぐバックアップ」で1回手動実行し、pCloud にファイルが届くこと、最後まで完走することを確認します。
 7. まず 2〜3 サイトで数週間運用し、安定したら残りのサイトへ展開します。
 
@@ -160,7 +159,7 @@ WP-Cron はサイトにアクセスがないと動きません。アクセスが
    ```
 
    この URL でできるのは「バックアップの処理を1回進める」ことだけです。データの取得や設定変更はできません。鍵は「接続」タブの「URL を再生成」で再発行できます。
-3. サーバーの cron に **5 分ごと** で登録します。コマンドの例:
+3. サーバーの cron に **1 分ごと**（サーバーで選べる最短の間隔）で登録します。バックアップが動いていないときの呼び出しは、予定時刻かどうかを確かめるだけなのですぐ終わります。コマンドの例:
 
    ```
    curl -fsS 'https://example.com/?wp-pcloud-backup=run&key=<64桁の16進文字列>' > /dev/null
@@ -170,11 +169,26 @@ WP-Cron はサイトにアクセスがないと動きません。アクセスが
 
 ### heteml
 
-コントロールパネル → cron 設定 から、実行間隔を 5 分ごとにして、上の `curl` または `wget` のコマンドを登録します。PHP ファイルを実行する方式も選べます。
+コントロールパネル → cron 設定 から、実行間隔を 1 分ごと（選べない場合は選べる最短の間隔）にして、上の `curl` または `wget` のコマンドを登録します。PHP ファイルを実行する方式も選べます。
 
 ### さくらのレンタルサーバー
 
-サーバーコントロールパネル → スクリプト設定 → CRON 設定 から、5 分ごとのスケジュールでコマンド（`curl` / `wget`）または PHP ファイルを登録します。
+サーバーコントロールパネル → スクリプト設定 → CRON 設定 から、1 分ごと（選べない場合は選べる最短の間隔）のスケジュールでコマンド（`curl` / `wget`）または PHP ファイルを登録します。
+
+### 処理の速さの目安
+
+1 回の呼び出し（WP-Cron の 1 回、または外部 cron URL の 1 回）では、設定の「1 回の実行時間」（既定 20 秒）のあいだ、ZIP の作成と pCloud へのアップロードを交互に続けます。アップロード中のパートは時間切れでも途中で止めないので、1 回の呼び出しでは**少なくとも 1 パート（既定 25MB）を必ず送り**、所要時間は最大で「実行時間 + パート 1 つの送信時間」になります（上り 1MB/s なら約 20 秒 + 25 秒）。Web サーバーの応答タイムアウト（60〜120 秒程度）に収まるよう、実行時間は 20〜30 秒程度にしてください。
+
+1 回で送れる量はおおむね「実行時間 × 上り速度」で、上りが遅くても 1 パートは送ります。バックアップは開始から 48 時間で打ち切られる（失敗扱い）ので、終わるサイズの上限の目安は次のとおりです（パート 25MB、実行時間 20 秒）。
+
+| 呼び出し間隔 | 上り 1MB/s 程度（1 回 ≒ 1 パート） | 上り 5MB/s 程度（1 回 ≒ 4〜5 パート） |
+|---|---|---|
+| 1 分ごと | 約 1.5GB/時 → 40GB で約 27 時間、48 時間で約 70GB | 約 7GB/時 → 40GB で約 6 時間 |
+| 5 分ごと | 約 0.3GB/時 → 48 時間で約 14GB | 約 1.5GB/時 → 48 時間で約 70GB |
+
+5 分ごとにしか呼び出せないサーバーで上りが遅い場合、サイトの大きさの上限は約 14GB です。それより大きいサイトは、分割サイズを大きくする（50MB なら上限も約 2 倍）か、1 分ごとに呼び出せる方法（アクセスの多いサイトでの WP-Cron など）を使ってください。
+
+参考: wp-env で保存先を同じマシンのフォルダにした計測（ネットワークの待ち時間なし）では、約 3GB・120 パートのサイトが 8 回の呼び出し（1 回あたり約 22 秒）で完走しました。
 
 ## 復元手順
 
@@ -362,7 +376,7 @@ while curl -fsS "$URL" | grep -o '"running":true,"step":"[a-z]*","progress":[0-9
 npx @wordpress/env@12.0.0 run cli wp option get wp_pcloud_backup_history --format=json
 ```
 
-WP-Cron はコンテナ内から `localhost:8888` に届かないため、wp-env では自動では動きません（「接続」タブの「次回の定期チェック」が過去のままになります）。上のように外部 cron URL を呼ぶか、`wp cron event run wp_pcloud_backup_tick` を実行してください。
+wp-env でも WP-Cron は動きます（サイトへのアクセスがあると、コンテナ内から `wp-cron.php` が呼ばれます）。アクセスがなければ動かないので、「接続」タブの「次回の定期チェック」が過去のままになることがあります。呼び出し回数などを正確に測るときは、「設定」タブで「WP-Cron で自動実行する」を OFF にしてから外部 cron URL だけで進めてください（WP-Cron と外部 cron URL が同時に来ても、ロックで片方だけが処理を進めます）。手で 1 回進めるには `wp cron event run wp_pcloud_backup_tick` を実行します。
 
 復元リハーサル（ファイル）。コンテナの `unzip`（BusyBox）は ZIP64 を読めないので、ホストの `unzip` を使います:
 
@@ -373,13 +387,27 @@ unzip -tq /tmp/files.zip && unzip -q /tmp/files.zip -d /tmp/restored
 diff -r /tmp/restored/wp-content/uploads/fixture ~/.wp-env/<ハッシュ>/WordPress/wp-content/uploads/fixture && echo FILES_OK
 ```
 
-復元リハーサル（データベース）。tests 環境（http://localhost:8889）に流し込んでテーブル数を比べます。終わったら `npx @wordpress/env@12.0.0 clean tests` で tests 環境を初期化します:
+復元リハーサル（データベース）。tests 環境（http://localhost:8889）は同じテーブル構成の新しい WordPress なので、テーブル数を比べるだけでは復元できたことの証明になりません。バックアップの**前に**開発環境へ目印を作り、流し込んだ tests 環境に目印が現れることを確かめます。終わったら `npx @wordpress/env@12.0.0 clean tests` で tests 環境を初期化します。
 
 ```
-docker cp database.sql.gz $(docker ps -qf name=tests-cli):/tmp/database.sql.gz
-npx @wordpress/env@12.0.0 run tests-cli bash -c 'gunzip -c /tmp/database.sql.gz | wp db import - && wp db tables --all-tables'
-npx @wordpress/env@12.0.0 run cli wp db tables --all-tables
+# 1. バックアップ前に、開発環境へ目印を作る
+SENT="WPPB-SENTINEL-$(date +%s)"
+npx @wordpress/env@12.0.0 run cli wp post create --post_title="$SENT" --post_status=publish
+npx @wordpress/env@12.0.0 run cli wp option update wppb_sentinel "$SENT-option"
+
+# 2. バックアップを完走させたあと、その世代の database.sql.gz を tests 環境に流し込む
+#    （このリポジトリの wp-env プロジェクト名で絞り込み、別の wp-env の tests-cli を選ばないようにする）
+PROJECT=$(basename "$(npx @wordpress/env@12.0.0 status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["installPath"])')")
+docker cp database.sql.gz "$(docker ps -q --filter label=com.docker.compose.project=$PROJECT --filter label=com.docker.compose.service=tests-cli)":/tmp/database.sql.gz
+npx @wordpress/env@12.0.0 run tests-cli bash -c 'gunzip -c /tmp/database.sql.gz | wp db import -'
+
+# 3. 目印の投稿とオプションがあり、siteurl / home が開発環境の値（http://localhost:8888）であること
+npx @wordpress/env@12.0.0 run tests-cli wp post list --title="$SENT" --field=post_title
+npx @wordpress/env@12.0.0 run tests-cli wp option get wppb_sentinel
+npx @wordpress/env@12.0.0 run tests-cli wp db query "SELECT option_name, option_value FROM wp_options WHERE option_name IN ('siteurl','home')"
 ```
+
+`siteurl` は `wp option get` ではなく SQL で読みます。tests 環境の `wp-config.php` が `WP_SITEURL` / `WP_HOME` を `http://localhost:8889` に固定しているので、`wp option get siteurl` はデータベースの中身にかかわらず 8889 を返します。
 
 ### pCloud 実機での確認手順
 
@@ -402,7 +430,13 @@ npx @wordpress/env@12.0.0 run cli wp db tables --all-tables
 3. 管理画面の「接続」タブが「接続済み」になり、「ローカルフォルダ（開発モード）」の表記が消えていることを確認します（定数で設定したトークンはこの画面では検証されないので、トークンの誤りは次のバックアップで初めてわかります）。
 4. `bin/make-fixture-site.sh 100` のあと、「状態」タブの「今すぐバックアップ」を押して完走させます。
 5. pCloud のウェブ画面で `/WPBackup/localhost/<日付>/` に `manifest.json`、`database.sql.gz`、`files.zip.001…` があり、`.incomplete-` が残っていないことを確認します。
-6. `files.zip.001` をダウンロードし、`shasum files.zip.001`（SHA-1）が `manifest.json` の `parts[0].sha1` と一致することを確認します。
+6. `files.zip.001` と `manifest.json` をダウンロードし、`files.zip.001` の SHA-1 が manifest の値と一致することを確認します。manifest の `parts` の各要素には `name`、`size`、`sha1`、`sha256` があります（pCloud 側の照合は SHA-1、復元手順の確認は SHA-256 を使います）。
+
+   ```
+   shasum files.zip.001                                                        # SHA-1
+   jq -r '.parts[] | select(.name=="files.zip.001") | .sha1' manifest.json     # jq がある場合
+   grep -A2 '"files.zip.001"' manifest.json                                    # jq がない場合（"sha1" の行を見る）
+   ```
 7. 終わったら `.wp-env.override.json` を削除し、`npx @wordpress/env@12.0.0 start --update` で開発モードに戻します。
 
 翻訳テンプレート（`.pot`）の生成（コンテナ内のプラグインのフォルダ名はリポジトリのフォルダ名と同じです。`wp plugin list` で確認できます）:

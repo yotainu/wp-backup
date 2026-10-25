@@ -9,7 +9,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-10-25T10:16:02+00:00\n"
+"POT-Creation-Date: 2026-10-25T11:02:35+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.7.1\n"
 "X-Domain: wp-pcloud-backup\n"
@@ -117,62 +117,62 @@ msgstr ""
 msgid "実行中のバックアップはありません。"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:402
+#: includes/Admin/AdminPage.php:404
 msgid "この操作を行う権限がありません。"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:418
+#: includes/Admin/AdminPage.php:420
 #: includes/Admin/views/tab-connection.php:66
 msgid "アクセストークンは wp-config.php の定数で設定済みです。"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:423
+#: includes/Admin/AdminPage.php:425
 msgid "アクセストークンを入力してください。"
 msgstr ""
 
 #. translators: %s: error message from pCloud.
-#: includes/Admin/AdminPage.php:437
+#: includes/Admin/AdminPage.php:439
 msgid "pCloud に接続できませんでした: %s"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:448
+#: includes/Admin/AdminPage.php:450
 msgid "トークンを暗号化して保存できませんでした。サーバーの OpenSSL 設定を確認してください。"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:453
+#: includes/Admin/AdminPage.php:455
 msgid "pCloud に接続しました。"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:505
+#: includes/Admin/AdminPage.php:507
 #: includes/Admin/views/tab-connection.php:53
 msgid "状態"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:506
+#: includes/Admin/AdminPage.php:508
 msgid "設定"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:507
+#: includes/Admin/AdminPage.php:509
 msgid "接続"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:563
+#: includes/Admin/AdminPage.php:565
 msgid "毎日"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:564
+#: includes/Admin/AdminPage.php:566
 msgid "3 日ごと"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:565
+#: includes/Admin/AdminPage.php:567
 msgid "毎週"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:566
+#: includes/Admin/AdminPage.php:568
 msgid "2 週間ごと"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:567
+#: includes/Admin/AdminPage.php:569
 msgid "毎月"
 msgstr ""
 
@@ -590,7 +590,7 @@ msgstr ""
 msgid "%1$d分%2$d秒"
 msgstr ""
 
-#: includes/Job/JobRunner.php:1110
+#: includes/Job/JobRunner.php:1115
 msgid "バックアップが周期の2倍以上成功していません"
 msgstr ""
 
