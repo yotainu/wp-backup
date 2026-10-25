@@ -131,8 +131,9 @@ final class DbDumperTest extends TestCase {
 							'Key'   => '',
 						),
 						array(
+							// varbinary: hex literals, without the smaller page of blob/text tables.
 							'Field' => 'data',
-							'Type'  => 'longblob',
+							'Type'  => 'varbinary(255)',
 							'Key'   => '',
 						),
 						array(
@@ -214,7 +215,7 @@ final class DbDumperTest extends TestCase {
 		$this->assertSame(
 			array(
 				'SELECT * FROM `wp_empty` ORDER BY `id` LIMIT 1000 OFFSET 0',
-				'SELECT * FROM `wp_nopk` LIMIT 1000 OFFSET 0',
+				'SELECT * FROM `wp_nopk` LIMIT 200 OFFSET 0', // A text column: smaller pages.
 				'SELECT * FROM `wp_twopks` ORDER BY `a`, `b` LIMIT 1000 OFFSET 0',
 			),
 			$selects
@@ -524,5 +525,90 @@ final class DbDumperTest extends TestCase {
 
 		$this->expectException( \LogicException::class );
 		$dumper->compress( $this->noLimit() );
+	}
+	/**
+	 * A longtext table whose rows hold $bytes characters each.
+	 */
+	private function largeRowTable( int $rows, int $bytes ): array {
+		$data = array();
+		for ( $i = 1; $i <= $rows; $i++ ) {
+			$data[] = array(
+				'id'   => (string) $i,
+				'body' => str_repeat( chr( 96 + $i % 26 ), $bytes ),
+			);
+		}
+
+		return array(
+			'create'  => 'CREATE TABLE `wp_posts` (...)',
+			'columns' => array(
+				array(
+					'Field' => 'id',
+					'Type'  => 'bigint(20) unsigned',
+					'Key'   => 'PRI',
+				),
+				array(
+					'Field' => 'body',
+					'Type'  => 'longtext',
+					'Key'   => '',
+				),
+			),
+			'rows'    => $data,
+		);
+	}
+
+	public function test_large_rows_are_split_into_statements_of_about_one_mib(): void {
+		$rowBytes = 1048576;
+		$wpdb     = new FakeWpdb( array( 'wp_posts' => $this->largeRowTable( 7, $rowBytes ) ) );
+		$dumper   = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile() );
+
+		$this->assertTrue( $dumper->dump( $this->noLimit() ) );
+
+		$this->assertContains( 'SELECT * FROM `wp_posts` ORDER BY `id` LIMIT 200 OFFSET 0', $wpdb->queries, 'longtext: pages of 200 rows' );
+
+		$sql        = file_get_contents( $this->sqlFile() );
+		$statements = array_values(
+			array_filter(
+				explode( ";\n", $sql ),
+				static function ( string $statement ): bool {
+					return 0 === strpos( $statement, 'INSERT INTO' );
+				}
+			)
+		);
+		$this->assertCount( 7, $statements, '1 MiB rows: one row per statement' );
+		foreach ( $statements as $statement ) {
+			$this->assertLessThanOrEqual( DbDumper::MAX_STATEMENT_BYTES + $rowBytes + 100, strlen( $statement ) );
+		}
+		$this->assertSame( 7, $dumper->state()['rows'] );
+		for ( $i = 1; $i <= 7; $i++ ) {
+			$this->assertSame( 1, substr_count( $sql, '(' . $i . ", '" . str_repeat( chr( 96 + $i % 26 ), $rowBytes ) . "')" ), 'row ' . $i . ' is dumped exactly once' );
+		}
+	}
+
+	public function test_statements_pack_rows_up_to_one_mib(): void {
+		$rowBytes = 300000;
+		$wpdb     = new FakeWpdb( array( 'wp_posts' => $this->largeRowTable( 10, $rowBytes ) ) );
+		$dumper   = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile() );
+
+		$this->assertTrue( $dumper->dump( $this->noLimit() ) );
+
+		$sql = file_get_contents( $this->sqlFile() );
+		// Three 300 KB rows fit in 1 MiB, a fourth does not: 3 + 3 + 3 + 1.
+		$this->assertSame( 4, preg_match_all( '/^INSERT INTO `wp_posts`/m', $sql ) );
+		foreach ( explode( ";\n", $sql ) as $statement ) {
+			$this->assertLessThanOrEqual( DbDumper::MAX_STATEMENT_BYTES, strlen( $statement ) );
+		}
+		$this->assertSame( 10, preg_match_all( '/^\(\d+, \'/m', $sql ) );
+	}
+
+	public function test_large_row_page_is_kept_across_resume_and_bounded_by_batch(): void {
+		$wpdb   = new FakeWpdb( array( 'wp_posts' => $this->largeRowTable( 5, 10 ) ) );
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), array(), 2 );
+		$this->assertFalse( $dumper->dump( $this->stopNow() ) );
+		$this->assertSame( 2, $dumper->state()['page'], 'never above the batch size' );
+
+		$wpdb2   = new FakeWpdb( array( 'wp_posts' => $this->largeRowTable( 5, 10 ) ) );
+		$resumed = new DbDumper( $wpdb2, $this->sqlFile(), $this->gzFile(), json_decode( json_encode( $dumper->state() ), true ), 2 );
+		$this->assertTrue( $resumed->dump( $this->noLimit() ) );
+		$this->assertSame( 5, $resumed->state()['rows'] );
 	}
 }

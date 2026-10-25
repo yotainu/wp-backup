@@ -9,7 +9,9 @@ namespace WpPcloudBackup\Db;
  * time budget is used up, and state() returns what is needed to continue
  * with a new instance. The dump walks tables in name order and pages each
  * table with LIMIT/OFFSET (ordered by primary key when there is one), writing
- * one INSERT statement per page. Pure PHP: no WordPress functions are used.
+ * INSERT statements of at most MAX_STATEMENT_BYTES (one per page for small rows).
+ * Tables with text/blob/json columns use pages of LARGE_ROW_PAGE rows.
+ * Pure PHP: no WordPress functions are used.
  */
 class DbDumper {
 
@@ -17,6 +19,18 @@ class DbDumper {
 	 * Bytes read from the SQL file per gzip chunk.
 	 */
 	const CHUNK_SIZE = 1048576;
+
+	/**
+	 * An INSERT statement is closed once it reaches this size, so a page of large rows never
+	 * becomes one huge statement (memory while dumping, max_allowed_packet when restoring).
+	 * A single row larger than this still becomes one statement of its own.
+	 */
+	const MAX_STATEMENT_BYTES = 1048576;
+
+	/**
+	 * Rows per SELECT page for tables with text, blob or json columns (rows may be large).
+	 */
+	const LARGE_ROW_PAGE = 200;
 
 	/**
 	 * Database access object.
@@ -40,7 +54,7 @@ class DbDumper {
 	private $gzFile;
 
 	/**
-	 * Maximum rows per INSERT statement (and per SELECT page).
+	 * Maximum rows per SELECT page (and per INSERT statement).
 	 *
 	 * @var int
 	 */
@@ -85,6 +99,7 @@ class DbDumper {
 				'columns'         => array(),
 				'pk'              => array(),
 				'types'           => array(),
+				'page'            => 0,
 				'sql_bytes'       => 0,
 				'gz_bytes'        => 0,
 			),
@@ -102,7 +117,8 @@ class DbDumper {
 	 * Progress state, to be persisted and passed to a new instance.
 	 *
 	 * Keys: tables, table_index, offset, phase ('dump'|'compress'|'done'),
-	 * compress_offset, rows, columns, pk, types, sql_bytes (bytes written to
+	 * compress_offset, rows, columns, pk, types, page (rows per SELECT of the
+	 * current table), sql_bytes (bytes written to
 	 * the SQL file), gz_bytes (bytes of the gzip file after the last run).
 	 * On resume, output files are truncated back to these sizes.
 	 */
@@ -146,21 +162,24 @@ class DbDumper {
 				$this->startTable( $table );
 			}
 
-			$rows = $this->fetchPage( $table );
+			$page = $this->pageSize();
+			$rows = $this->fetchPage( $table, $page );
 			$n    = count( $rows );
 
 			if ( $n > 0 ) {
-				$this->append( $this->insertStatement( $table, $rows ) );
+				$this->appendInserts( $table, $rows );
 				$this->state['offset'] += $n;
 				$this->state['rows']   += $n;
 			}
+			unset( $rows );
 
-			if ( $n < $this->batch ) {
+			if ( $n < $page ) {
 				++$this->state['table_index'];
 				$this->state['offset']  = 0;
 				$this->state['columns'] = array();
 				$this->state['pk']      = array();
 				$this->state['types']   = array();
+				$this->state['page']    = 0;
 			}
 
 			if ( $timeUp() ) {
@@ -271,15 +290,28 @@ class DbDumper {
 		$this->state['columns'] = array();
 		$this->state['pk']      = array();
 		$this->state['types']   = array();
+		$this->state['page']    = $this->batch;
 		foreach ( $columns as $column ) {
 			$this->state['columns'][] = $column['Field'];
 			if ( 'PRI' === $column['Key'] ) {
 				$this->state['pk'][] = $column['Field'];
 			}
 			$this->state['types'][ $column['Field'] ] = $this->classify( $column['Type'] );
+			if ( preg_match( '/(text|blob|json)\b/i', (string) $column['Type'] ) ) {
+				$this->state['page'] = min( $this->batch, self::LARGE_ROW_PAGE );
+			}
 		}
 
 		$this->append( 'DROP TABLE IF EXISTS ' . $this->ident( $table ) . ";\n" . $create['Create Table'] . ";\n" );
+	}
+
+	/**
+	 * Rows per SELECT page of the current table (chosen in startTable(), never above $batch).
+	 */
+	private function pageSize(): int {
+		$page = (int) $this->state['page'];
+
+		return $page > 0 ? min( $page, $this->batch ) : $this->batch;
 	}
 
 	/**
@@ -287,7 +319,7 @@ class DbDumper {
 	 *
 	 * @return array[]
 	 */
-	private function fetchPage( string $table ): array {
+	private function fetchPage( string $table, int $page ): array {
 		$sql = 'SELECT * FROM ' . $this->ident( $table );
 
 		if ( $table === $this->wpdb->options ) {
@@ -298,31 +330,42 @@ class DbDumper {
 			$sql .= ' ORDER BY ' . implode( ', ', array_map( array( $this, 'ident' ), $this->state['pk'] ) );
 		}
 
-		$sql .= ' LIMIT ' . $this->batch . ' OFFSET ' . $this->state['offset'];
+		$sql .= ' LIMIT ' . $page . ' OFFSET ' . $this->state['offset'];
 
 		return $this->results( $sql );
 	}
 
 	/**
-	 * Build one multi-row INSERT statement.
+	 * Append the rows as multi-row INSERT statements, starting a new statement before one
+	 * would grow past MAX_STATEMENT_BYTES.
 	 *
 	 * @param array[] $rows Rows as column => value maps.
 	 */
-	private function insertStatement( string $table, array $rows ): string {
+	private function appendInserts( string $table, array $rows ): void {
 		$columns = $this->state['columns'];
-		$tuples  = array();
+		$head    = 'INSERT INTO ' . $this->ident( $table )
+			. ' (' . implode( ', ', array_map( array( $this, 'ident' ), $columns ) ) . ") VALUES\n";
+		$buffer  = '';
 
 		foreach ( $rows as $row ) {
 			$values = array();
 			foreach ( $columns as $column ) {
 				$values[] = $this->literal( $row[ $column ] ?? null, $this->state['types'][ $column ] );
 			}
-			$tuples[] = '(' . implode( ', ', $values ) . ')';
+			$tuple = '(' . implode( ', ', $values ) . ')';
+			unset( $values );
+
+			if ( '' !== $buffer && strlen( $buffer ) + 2 + strlen( $tuple ) > self::MAX_STATEMENT_BYTES ) {
+				$this->append( $buffer . ";\n" );
+				$buffer = '';
+			}
+
+			$buffer .= '' === $buffer ? $head . $tuple : ",\n" . $tuple;
 		}
 
-		return 'INSERT INTO ' . $this->ident( $table )
-			. ' (' . implode( ', ', array_map( array( $this, 'ident' ), $columns ) ) . ") VALUES\n"
-			. implode( ",\n", $tuples ) . ";\n";
+		if ( '' !== $buffer ) {
+			$this->append( $buffer . ";\n" );
+		}
 	}
 
 	/**
