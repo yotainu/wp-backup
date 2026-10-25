@@ -37,12 +37,22 @@ class ArrayBackedSettings extends Settings {
 
 	public function __construct( array $values = array(), array $locked = array() ) {
 		$this->values = $values + array(
-			'keep'             => 3,
-			'schedule'         => 'weekly',
-			'start_time'       => '03:00',
-			'workdir_name'     => '',
-			'connection_email' => '',
-			'cron_key'         => 'k',
+			'keep'              => 3,
+			'schedule'          => 'weekly',
+			'start_time'        => '03:00',
+			'workdir_name'      => '',
+			'connection_email'  => '',
+			'cron_key'          => 'k',
+			'root_folder'       => '/WPBackup',
+			'site_folder'       => 'example.com',
+			'backup_root'       => '/var/www/html',
+			'excludes'          => array(),
+			'part_size_mb'      => 25,
+			'run_budget_sec'    => 20,
+			'use_wp_cron'       => true,
+			'auto_update'       => true,
+			'notify_email'      => '',
+			'notify_on_success' => false,
 		);
 		$this->locked = $locked;
 	}

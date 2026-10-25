@@ -6,6 +6,9 @@
  * WordPress functions. Only the autoloader is loaded.
  */
 
+// PHP 7.4 without a php.ini hides notices (E_ALL & ~E_NOTICE); report everything like PHP 8 does.
+error_reporting( E_ALL );
+
 require_once dirname( __DIR__ ) . '/vendor/autoload.php';
 require_once dirname( __DIR__ ) . '/includes/autoload.php';
 
