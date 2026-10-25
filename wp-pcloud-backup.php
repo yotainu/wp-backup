@@ -16,6 +16,11 @@ define( 'WP_PCLOUD_BACKUP_VERSION', '0.1.0' );
 define( 'WP_PCLOUD_BACKUP_FILE', __FILE__ );
 define( 'WP_PCLOUD_BACKUP_DIR', __DIR__ );
 
+if ( ! defined( 'WP_PCLOUD_BACKUP_UPDATE_URL' ) ) {
+	// OWNER is a placeholder: replace it with the GitHub account before the first release.
+	define( 'WP_PCLOUD_BACKUP_UPDATE_URL', 'https://raw.githubusercontent.com/OWNER/wp-pcloud-backup/main/update.json' );
+}
+
 require_once __DIR__ . '/includes/autoload.php';
 
 add_action( 'plugins_loaded', array( \WpPcloudBackup\Plugin::class, 'boot' ) );

@@ -90,7 +90,19 @@ final class Plugin {
 			( new Admin\AdminPage( $plugin ) )->register();
 		}
 
-		// Task 17 hooks the updater here.
+		// Registered in every context: auto-updates run from WP-Cron.
+		( new Updater(
+			$plugin->settings(),
+			new CurlTransport(),
+			WP_PCLOUD_BACKUP_UPDATE_URL,
+			plugin_basename( WP_PCLOUD_BACKUP_FILE ),
+			WP_PCLOUD_BACKUP_VERSION,
+			function () use ( $plugin ) {
+				$runner = $plugin->runner();
+				return $runner ? (bool) $runner->status()['running'] : false;
+			},
+			$plugin->notifier()
+		) )->register();
 	}
 
 	/**
