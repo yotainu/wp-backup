@@ -7,6 +7,9 @@ namespace WpPcloudBackup\Tests\Support;
  *
  * Tables are described as:
  * array( 'name' => array( 'create' => 'CREATE TABLE ...', 'columns' => array( array( 'Field' => ..., 'Type' => ..., 'Key' => ... ) ), 'rows' => array( array( col => value ) ) ) )
+ * An optional 'type' => 'VIEW' marks a view (default 'BASE TABLE').
+ *
+ * Like the real wpdb, a failing query sets $last_error and returns an empty result.
  */
 final class FakeWpdb {
 
@@ -25,6 +28,13 @@ final class FakeWpdb {
 	public $prefix = 'wp_';
 
 	/**
+	 * Error message of the last query, as on \wpdb ('' when it succeeded).
+	 *
+	 * @var string
+	 */
+	public $last_error = '';
+
+	/**
 	 * Every SQL string received, in order.
 	 *
 	 * @var string[]
@@ -39,6 +49,13 @@ final class FakeWpdb {
 	private $tables;
 
 	/**
+	 * Scripted failure for an upcoming query: array( message, SQL substring ), or null.
+	 *
+	 * @var array|null
+	 */
+	private $failure = null;
+
+	/**
 	 * @param array $tables Table definitions keyed by table name.
 	 */
 	public function __construct( array $tables ) {
@@ -46,19 +63,32 @@ final class FakeWpdb {
 	}
 
 	/**
-	 * Handle SHOW TABLES.
+	 * Make the next query whose SQL contains $matching fail with $message.
 	 *
-	 * @param string $sql SQL.
-	 * @return string[]
+	 * @param string $message  Error message to expose in $last_error.
+	 * @param string $matching SQL substring selecting the query ('' = the next one).
 	 */
-	public function get_col( $sql ) {
-		$this->queries[] = $sql;
+	public function failNext( string $message, string $matching = '' ): void {
+		$this->failure = array( $message, $matching );
+	}
 
-		if ( 'SHOW TABLES' === $sql ) {
-			return array_keys( $this->tables );
+	/**
+	 * Record a query and apply a scripted failure.
+	 *
+	 * @return bool True when the query should fail.
+	 */
+	private function begin( string $sql ): bool {
+		$this->queries[]  = $sql;
+		$this->last_error = '';
+
+		if ( null !== $this->failure && false !== strpos( $sql, $this->failure[1] ) ) {
+			$this->last_error = $this->failure[0];
+			$this->failure    = null;
+
+			return true;
 		}
 
-		throw new \LogicException( 'Unexpected get_col SQL: ' . $sql );
+		return false;
 	}
 
 	/**
@@ -69,7 +99,9 @@ final class FakeWpdb {
 	 * @return array|null
 	 */
 	public function get_row( $sql, $output = 'OBJECT' ) {
-		$this->queries[] = $sql;
+		if ( $this->begin( $sql ) ) {
+			return null;
+		}
 
 		if ( preg_match( '/^SHOW CREATE TABLE `([^`]+)`$/', $sql, $m ) && isset( $this->tables[ $m[1] ] ) ) {
 			return array(
@@ -82,14 +114,28 @@ final class FakeWpdb {
 	}
 
 	/**
-	 * Handle SHOW COLUMNS and the paged SELECTs.
+	 * Handle SHOW FULL TABLES, SHOW COLUMNS and the paged SELECTs.
 	 *
 	 * @param string $sql    SQL.
 	 * @param string $output Output type (ignored; always associative).
 	 * @return array
 	 */
 	public function get_results( $sql, $output = 'OBJECT' ) {
-		$this->queries[] = $sql;
+		if ( $this->begin( $sql ) ) {
+			return array();
+		}
+
+		if ( 'SHOW FULL TABLES' === $sql ) {
+			$result = array();
+			foreach ( $this->tables as $name => $table ) {
+				$result[] = array(
+					'Tables_in_fake' => $name,
+					'Table_type'     => $table['type'] ?? 'BASE TABLE',
+				);
+			}
+
+			return $result;
+		}
 
 		if ( preg_match( '/^SHOW COLUMNS FROM `([^`]+)`$/', $sql, $m ) && isset( $this->tables[ $m[1] ] ) ) {
 			return $this->tables[ $m[1] ]['columns'];

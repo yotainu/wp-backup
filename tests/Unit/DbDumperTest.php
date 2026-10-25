@@ -377,4 +377,151 @@ final class DbDumperTest extends TestCase {
 		$this->assertSame( strlen( $sql ), strlen( $out ) );
 		$this->assertTrue( $sql === $out );
 	}
+
+	/**
+	 * Read a whole (possibly multi-member) gzip file.
+	 */
+	private function gunzipFile( string $file ): string {
+		$handle = gzopen( $file, 'rb' );
+		$out    = '';
+		while ( ! gzeof( $handle ) ) {
+			$out .= gzread( $handle, 65536 );
+		}
+		gzclose( $handle );
+
+		return $out;
+	}
+
+	/**
+	 * A table of many rows with long values, so the SQL is larger than one gzip chunk.
+	 */
+	private function bigTables( int $count ): array {
+		$rows = array();
+		for ( $i = 1; $i <= $count; $i++ ) {
+			$rows[] = array(
+				'id'   => (string) $i,
+				'name' => md5( (string) $i ) . str_repeat( 'x', 1000 ),
+			);
+		}
+
+		return array( 'wp_things' => $this->simpleTable( $rows ) );
+	}
+
+	public function test_failed_page_select_throws_instead_of_truncating(): void {
+		$wpdb = new FakeWpdb( array( 'wp_things' => $this->simpleTable( array( array( 'id' => '1', 'name' => 'a' ) ) ) ) );
+		$wpdb->failNext( 'Lost connection', 'SELECT * FROM' );
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile() );
+
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'Query failed: Lost connection' );
+		$dumper->dump( $this->noLimit() );
+	}
+
+	public function test_failed_show_tables_throws(): void {
+		$wpdb = new FakeWpdb( array( 'wp_things' => $this->simpleTable( array() ) ) );
+		$wpdb->failNext( 'Server has gone away', 'SHOW FULL TABLES' );
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile() );
+
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'Query failed: Server has gone away' );
+		$dumper->dump( $this->noLimit() );
+	}
+
+	public function test_views_are_not_dumped(): void {
+		$wpdb = new FakeWpdb(
+			array(
+				'wp_things' => $this->simpleTable( array( array( 'id' => '1', 'name' => 'a' ) ) ),
+				'wp_view'   => array( 'type' => 'VIEW' ),
+			)
+		);
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile() );
+
+		$this->assertTrue( $dumper->dump( $this->noLimit() ) );
+
+		$this->assertSame( array( 'wp_things' ), $dumper->state()['tables'] );
+		$this->assertStringNotContainsString( 'wp_view', file_get_contents( $this->sqlFile() ) );
+		$this->assertContains( 'SHOW FULL TABLES', $wpdb->queries );
+	}
+
+	public function test_dump_then_compress_in_same_process_keeps_whole_sql(): void {
+		$tables = $this->bigTables( 1500 );
+
+		$reference = new DbDumper( new FakeWpdb( $tables ), $this->dir . '/ref.sql', $this->dir . '/ref.gz', array(), 100 );
+		$this->assertTrue( $reference->dump( $this->noLimit() ) );
+		$expected = file_get_contents( $this->dir . '/ref.sql' );
+		$this->assertGreaterThan( 1048576, strlen( $expected ) );
+
+		$dumper = new DbDumper( new FakeWpdb( $tables ), $this->sqlFile(), $this->gzFile(), array(), 100 );
+		$this->assertFalse( $dumper->dump( $this->stopNow() ) );
+		// Prime PHP's stat cache with a size that is too small once the dump completes.
+		$this->assertLessThan( strlen( $expected ), filesize( $this->sqlFile() ) );
+		$this->assertTrue( $dumper->dump( $this->noLimit() ) );
+		$this->assertTrue( $dumper->compress( $this->noLimit() ) );
+
+		$this->assertFileDoesNotExist( $this->sqlFile() );
+		$this->assertTrue( $expected === $this->gunzipFile( $this->gzFile() ) );
+	}
+
+	public function test_resume_discards_bytes_written_after_saved_state(): void {
+		$tables = $this->bigTables( 7 );
+
+		$reference = new DbDumper( new FakeWpdb( $tables ), $this->dir . '/ref.sql', $this->gzFile(), array(), 3 );
+		$this->assertTrue( $reference->dump( $this->noLimit() ) );
+
+		$first = new DbDumper( new FakeWpdb( $tables ), $this->sqlFile(), $this->gzFile(), array(), 3 );
+		$this->assertFalse( $first->dump( $this->stopNow() ) );
+		$state = $first->state();
+		$this->assertSame( filesize( $this->sqlFile() ), $state['sql_bytes'] );
+
+		// A run that was killed after appending a page but before its state was saved.
+		file_put_contents( $this->sqlFile(), "INSERT INTO `wp_things` (`id`) VALUES\n(999);\n", FILE_APPEND );
+
+		$resumed = new DbDumper( new FakeWpdb( $tables ), $this->sqlFile(), $this->gzFile(), $state, 3 );
+		$this->assertTrue( $resumed->dump( $this->noLimit() ) );
+
+		$this->assertSame( file_get_contents( $this->dir . '/ref.sql' ), file_get_contents( $this->sqlFile() ) );
+	}
+
+	public function test_resume_throws_when_sql_file_is_shorter_than_state(): void {
+		$tables = $this->bigTables( 7 );
+		$first  = new DbDumper( new FakeWpdb( $tables ), $this->sqlFile(), $this->gzFile(), array(), 3 );
+		$first->dump( $this->stopNow() );
+		$state = $first->state();
+
+		file_put_contents( $this->sqlFile(), 'short' );
+
+		$this->expectException( \RuntimeException::class );
+		new DbDumper( new FakeWpdb( $tables ), $this->sqlFile(), $this->gzFile(), $state, 3 );
+	}
+
+	public function test_compress_resume_discards_gzip_bytes_written_after_saved_state(): void {
+		$sql = '';
+		mt_srand( 7 );
+		while ( strlen( $sql ) < 2600000 ) {
+			$sql .= md5( (string) mt_rand() ) . "\n";
+		}
+		file_put_contents( $this->sqlFile(), $sql );
+
+		$first = new DbDumper( new FakeWpdb( array() ), $this->sqlFile(), $this->gzFile(), array( 'phase' => 'compress' ) );
+		$this->assertFalse( $first->compress( $this->stopNow() ) );
+		$state = $first->state();
+		$this->assertSame( filesize( $this->gzFile() ), $state['gz_bytes'] );
+
+		file_put_contents( $this->gzFile(), 'junk from a killed run', FILE_APPEND );
+
+		do {
+			$dumper = new DbDumper( new FakeWpdb( array() ), $this->sqlFile(), $this->gzFile(), $state );
+			$done   = $dumper->compress( $this->stopNow() );
+			$state  = $dumper->state();
+		} while ( ! $done );
+
+		$this->assertTrue( $sql === $this->gunzipFile( $this->gzFile() ) );
+	}
+
+	public function test_compress_before_dump_finished_is_a_logic_error(): void {
+		$dumper = new DbDumper( new FakeWpdb( array() ), $this->sqlFile(), $this->gzFile() );
+
+		$this->expectException( \LogicException::class );
+		$dumper->compress( $this->noLimit() );
+	}
 }

@@ -63,6 +63,7 @@ class DbDumper {
 	 * @param int    $batch   Rows per INSERT statement (must be positive).
 	 *
 	 * @throws \InvalidArgumentException If the batch size is not positive.
+	 * @throws \RuntimeException         If an output file is shorter than the saved state says.
 	 */
 	public function __construct( $wpdb, string $sqlFile, string $gzFile, array $state = array(), int $batch = 1000 ) {
 		if ( $batch < 1 ) {
@@ -84,16 +85,26 @@ class DbDumper {
 				'columns'         => array(),
 				'pk'              => array(),
 				'types'           => array(),
+				'sql_bytes'       => 0,
+				'gz_bytes'        => 0,
 			),
 			$state
 		);
+
+		if ( 'dump' === $this->state['phase'] ) {
+			$this->truncateTo( $this->sqlFile, $this->state['sql_bytes'] );
+		} elseif ( 'compress' === $this->state['phase'] ) {
+			$this->truncateTo( $this->gzFile, $this->state['gz_bytes'] );
+		}
 	}
 
 	/**
 	 * Progress state, to be persisted and passed to a new instance.
 	 *
 	 * Keys: tables, table_index, offset, phase ('dump'|'compress'|'done'),
-	 * compress_offset, rows, columns, pk, types.
+	 * compress_offset, rows, columns, pk, types, sql_bytes (bytes written to
+	 * the SQL file), gz_bytes (bytes of the gzip file after the last run).
+	 * On resume, output files are truncated back to these sizes.
 	 */
 	public function state(): array {
 		return $this->state;
@@ -113,15 +124,18 @@ class DbDumper {
 		}
 
 		if ( array() === $this->state['tables'] ) {
-			$tables = $this->wpdb->get_col( 'SHOW TABLES' );
-			if ( ! is_array( $tables ) ) {
-				throw new \RuntimeException( 'SHOW TABLES failed.' );
+			$tables = array();
+			foreach ( $this->results( 'SHOW FULL TABLES' ) as $row ) {
+				$row = array_values( $row );
+				if ( isset( $row[1] ) && 'BASE TABLE' === $row[1] ) {
+					$tables[] = (string) $row[0];
+				}
 			}
 			sort( $tables );
-			$this->state['tables'] = array_values( $tables );
+			$this->state['tables'] = $tables;
 		}
 
-		if ( 0 === $this->state['table_index'] && 0 === $this->state['offset'] && ! file_exists( $this->sqlFile ) ) {
+		if ( 0 === $this->state['table_index'] && 0 === $this->state['offset'] && 0 === $this->state['sql_bytes'] ) {
 			$this->append( "-- WP pCloud Backup SQL dump\nSET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS=0;\nSET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';\n" );
 		}
 
@@ -175,6 +189,12 @@ class DbDumper {
 			return true;
 		}
 
+		if ( 'compress' !== $this->state['phase'] ) {
+			throw new \LogicException( 'compress() called before the dump finished.' );
+		}
+
+		clearstatcache( true, $this->sqlFile );
+
 		$in = fopen( $this->sqlFile, 'rb' );
 		if ( false === $in ) {
 			throw new \RuntimeException( 'Cannot open SQL file: ' . $this->sqlFile );
@@ -186,25 +206,32 @@ class DbDumper {
 			throw new \RuntimeException( 'Cannot open gzip file: ' . $this->gzFile );
 		}
 
-		$size     = filesize( $this->sqlFile );
-		$finished = true;
-
 		fseek( $in, $this->state['compress_offset'] );
-		while ( $this->state['compress_offset'] < $size ) {
+
+		$reachedEof = false;
+		while ( true ) {
 			$chunk = fread( $in, self::CHUNK_SIZE );
-			if ( false === $chunk || '' === $chunk ) {
+			if ( false === $chunk || ( '' === $chunk && ! feof( $in ) ) ) {
+				fclose( $in );
+				gzclose( $gz );
+				throw new \RuntimeException( 'Cannot read SQL file: ' . $this->sqlFile );
+			}
+
+			if ( '' !== $chunk ) {
+				if ( gzwrite( $gz, $chunk ) !== strlen( $chunk ) ) {
+					fclose( $in );
+					gzclose( $gz );
+					throw new \RuntimeException( 'Cannot write gzip file: ' . $this->gzFile );
+				}
+				$this->state['compress_offset'] += strlen( $chunk );
+			}
+
+			if ( feof( $in ) ) {
+				$reachedEof = true;
 				break;
 			}
 
-			if ( gzwrite( $gz, $chunk ) !== strlen( $chunk ) ) {
-				fclose( $in );
-				gzclose( $gz );
-				throw new \RuntimeException( 'Cannot write gzip file: ' . $this->gzFile );
-			}
-			$this->state['compress_offset'] += strlen( $chunk );
-
-			if ( $this->state['compress_offset'] < $size && $timeUp() ) {
-				$finished = false;
+			if ( $timeUp() ) {
 				break;
 			}
 		}
@@ -212,8 +239,16 @@ class DbDumper {
 		fclose( $in );
 		gzclose( $gz );
 
-		if ( ! $finished ) {
+		clearstatcache( true, $this->gzFile );
+		$this->state['gz_bytes'] = (int) filesize( $this->gzFile );
+
+		if ( ! $reachedEof ) {
 			return false;
+		}
+
+		clearstatcache( true, $this->sqlFile );
+		if ( filesize( $this->sqlFile ) !== $this->state['compress_offset'] ) {
+			throw new \RuntimeException( 'SQL file changed while compressing: ' . $this->sqlFile );
 		}
 
 		unlink( $this->sqlFile );
@@ -226,15 +261,12 @@ class DbDumper {
 	 * Write DROP and CREATE for a table and cache its column metadata in the state.
 	 */
 	private function startTable( string $table ): void {
-		$create = $this->wpdb->get_row( 'SHOW CREATE TABLE ' . $this->ident( $table ), 'ARRAY_A' );
-		if ( ! is_array( $create ) || ! isset( $create['Create Table'] ) ) {
+		$create = $this->row( 'SHOW CREATE TABLE ' . $this->ident( $table ) );
+		if ( ! isset( $create['Create Table'] ) ) {
 			throw new \RuntimeException( 'SHOW CREATE TABLE failed for ' . $table );
 		}
 
-		$columns = $this->wpdb->get_results( 'SHOW COLUMNS FROM ' . $this->ident( $table ), 'ARRAY_A' );
-		if ( ! is_array( $columns ) ) {
-			throw new \RuntimeException( 'SHOW COLUMNS failed for ' . $table );
-		}
+		$columns = $this->results( 'SHOW COLUMNS FROM ' . $this->ident( $table ) );
 
 		$this->state['columns'] = array();
 		$this->state['pk']      = array();
@@ -268,12 +300,7 @@ class DbDumper {
 
 		$sql .= ' LIMIT ' . $this->batch . ' OFFSET ' . $this->state['offset'];
 
-		$rows = $this->wpdb->get_results( $sql, 'ARRAY_A' );
-		if ( ! is_array( $rows ) ) {
-			throw new \RuntimeException( 'SELECT failed for ' . $table );
-		}
-
-		return $rows;
+		return $this->results( $sql );
 	}
 
 	/**
@@ -356,13 +383,83 @@ class DbDumper {
 	}
 
 	/**
+	 * Run get_results() and fail loudly on a query error.
+	 *
+	 * @return array[]
+	 *
+	 * @throws \RuntimeException If the query failed.
+	 */
+	private function results( string $sql ): array {
+		$rows = $this->wpdb->get_results( $sql, 'ARRAY_A' );
+		$this->assertNoError();
+
+		return is_array( $rows ) ? $rows : array();
+	}
+
+	/**
+	 * Run get_row() and fail loudly on a query error.
+	 *
+	 * @throws \RuntimeException If the query failed.
+	 */
+	private function row( string $sql ): array {
+		$row = $this->wpdb->get_row( $sql, 'ARRAY_A' );
+		$this->assertNoError();
+
+		return is_array( $row ) ? $row : array();
+	}
+
+	/**
+	 * Wpdb returns an empty result on error, so check last_error after every query.
+	 *
+	 * @throws \RuntimeException If the last query failed.
+	 */
+	private function assertNoError(): void {
+		$error = (string) $this->wpdb->last_error;
+		if ( '' !== $error ) {
+			throw new \RuntimeException( 'Query failed: ' . $error );
+		}
+	}
+
+	/**
+	 * Cut an output file back to the size recorded in the state.
+	 *
+	 * @throws \RuntimeException If the file is missing or shorter than recorded.
+	 */
+	private function truncateTo( string $file, int $bytes ): void {
+		clearstatcache( true, $file );
+
+		if ( ! file_exists( $file ) ) {
+			if ( $bytes > 0 ) {
+				throw new \RuntimeException( 'Output file is missing: ' . $file );
+			}
+			return;
+		}
+
+		$size = filesize( $file );
+		if ( $size < $bytes ) {
+			throw new \RuntimeException( 'Output file is shorter than the saved state: ' . $file );
+		}
+
+		if ( $size > $bytes ) {
+			$handle = fopen( $file, 'r+b' );
+			if ( false === $handle || ! ftruncate( $handle, $bytes ) ) {
+				throw new \RuntimeException( 'Cannot truncate output file: ' . $file );
+			}
+			fclose( $handle );
+		}
+	}
+
+	/**
 	 * Append text to the SQL file.
 	 *
 	 * @throws \RuntimeException If the write fails.
 	 */
 	private function append( string $text ): void {
-		if ( false === file_put_contents( $this->sqlFile, $text, FILE_APPEND ) ) {
+		$written = file_put_contents( $this->sqlFile, $text, FILE_APPEND );
+		if ( strlen( $text ) !== $written ) {
 			throw new \RuntimeException( 'Cannot write SQL file: ' . $this->sqlFile );
 		}
+
+		$this->state['sql_bytes'] += $written;
 	}
 }
