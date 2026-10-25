@@ -19,3 +19,6 @@ define( 'WP_PCLOUD_BACKUP_DIR', __DIR__ );
 require_once __DIR__ . '/includes/autoload.php';
 
 add_action( 'plugins_loaded', array( \WpPcloudBackup\Plugin::class, 'boot' ) );
+
+register_activation_hook( __FILE__, array( \WpPcloudBackup\Plugin::class, 'activate' ) );
+register_deactivation_hook( __FILE__, array( \WpPcloudBackup\Plugin::class, 'deactivate' ) );
