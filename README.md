@@ -60,6 +60,26 @@ WordPress サイトのファイルとデータベースを、定期的に pCloud
 | PHP `ZipArchive`（`CHECKCONS` 付き） | 確認済み |
 | Windows エクスプローラー | **未確認**（ZIP64 形式のため。開けない場合は [7-Zip](https://7-zip.org/) を使ってください） |
 
+#### 実際の WordPress での動作確認（wp-env、2026-10-25）
+
+[wp-env](https://developer.wordpress.org/block-editor/reference-guides/packages/packages-env/)（`@wordpress/env` 12.0.0、WordPress 7.1.3、PHP 7.4.33、Apache）上で、開発モード（`WP_PCLOUD_BACKUP_STORAGE_DIR` でローカルフォルダに保存）を使って次を確認しました。ユニットテストは PHP 7.4 と 8.2 の両方で通過しています。
+
+| 確認項目 | 結果 |
+|---|---|
+| 外部 cron URL だけで最後まで完走（約 100MB のフィクスチャ、サイト全体 6,690 ファイル / 254MB） | 確認済み（7 パート、8 回の呼び出し、約 30 秒） |
+| 管理画面の「今すぐバックアップ」（AJAX）で進捗バーが進み、完走する | 確認済み（約 35 秒） |
+| 保存先に `manifest.json`、`database.sql.gz`、`files.zip.001…` が揃い、`.incomplete-` が残らない。各パートの sha256 が manifest と一致 | 確認済み |
+| 復元リハーサル: パートを番号順に結合 → `unzip -t` → 展開して元の `uploads` と `diff -r` が一致 | 確認済み（差分なし） |
+| 復元リハーサル: `database.sql.gz` を別の WordPress（wp-env の tests 環境）に `wp db import` し、テーブル数（12）と各テーブルの行数が一致 | 確認済み |
+| 中断・再開: 実行中に WordPress のコンテナを `docker kill`（ZIP 作成中とアップロード中の 2 回）→ 起動し直して呼び出しを続けると、続きから完走し、アーカイブも正常 | 確認済み（中断のたびに約 60 秒〔1 回の実行時間 × 3〕待ってから再開） |
+| 外部 cron URL: 鍵が違う / 鍵なし → HTTP 403、正しい鍵 → HTTP 200 + JSON | 確認済み |
+| 約 3GB のフィクスチャ（サイト全体 10,082 ファイル / 3.07GiB） | 確認済み（120 パート、115 回の呼び出し、約 6 分 20 秒。2〜3 秒間隔で呼び出した場合） |
+| 保持世代数（3）を超えた古い世代の削除 | 確認済み |
+| `WP_DEBUG_LOG` 有効時に、このプラグインによる notice / warning が出ない | 確認済み |
+| pCloud への実際のアップロード（`CurlTransport`） | **未確認**（下の「開発」の「pCloud 実機での確認手順」を参照） |
+
+1 回の呼び出し（WP-Cron の 1 回、外部 cron URL の 1 回）で pCloud に送るパートは 1 つです。そのため所要時間は「パート数 × 呼び出し間隔」が目安になります。上の 3GB（120 パート）の場合、外部 cron を 5 分ごとに呼ぶと約 10 時間かかります。
+
 ## 導入手順
 
 多数のサイトに入れるときの標準的な流れです。
@@ -316,16 +336,82 @@ PHP_VERSION=8.2 bin/test.sh      # PHP のバージョンを変える
 bin/test.sh --filter PluginTest  # 一部だけ実行
 ```
 
-実際の WordPress で動作を確認するには [wp-env](https://developer.wordpress.org/block-editor/reference-guides/packages/packages-env/) を使います。
+実際の WordPress で動作を確認するには [wp-env](https://developer.wordpress.org/block-editor/reference-guides/packages/packages-env/) を使います（Docker と Node.js が必要です）。
 
 ```
-npx @wordpress/env start
+npx @wordpress/env@12.0.0 start     # http://localhost:8888 （管理者 admin / password）
+npx @wordpress/env@12.0.0 stop
 ```
 
-翻訳テンプレート（`.pot`）の生成:
+`.wp-env.json` は開発モード（`WP_PCLOUD_BACKUP_STORAGE_DIR`）を有効にしてあり、バックアップは pCloud ではなくコンテナ内の `wp-content/wppb-remote/WPBackup/localhost/` に保存されます（開発モードでは保存先フォルダ自体はバックアップ対象から自動で除外されます）。`wp-content` はホストの `~/.wp-env/<ハッシュ>/WordPress/wp-content/` にあるので、保存されたパートはホスト側から直接読めます。`WP_DEBUG_LOG` も有効で、notice などは `wp-content/debug.log` に出ます。
+
+以下のコマンドの `npx @wordpress/env@12.0.0` は、インストール済みなら `wp-env` と読み替えてください（`npx wp-env` は別パッケージなので使えません）。
+
+テスト用のファイルを作る（`wp-content/uploads/fixture/` を、合計約 N MB のランダムなファイル〔1KB〜8MB、日本語名・空白入りの名前・入れ子のフォルダを含む〕で作り直します）:
 
 ```
-npx wp-env run cli wp i18n make-pot . languages/wp-pcloud-backup.pot --domain=wp-pcloud-backup
+bin/make-fixture-site.sh 100
+```
+
+ブラウザを使わずにバックアップを最後まで進める:
+
+```
+npx @wordpress/env@12.0.0 run cli wp eval '\WpPcloudBackup\Plugin::instance()->runner()->startJob("manual");'
+URL=$(npx @wordpress/env@12.0.0 run cli wp eval 'echo \WpPcloudBackup\Plugin::instance()->trigger()->cronUrl();' 2>/dev/null | tail -1)
+while curl -fsS "$URL" | grep -o '"running":true,"step":"[a-z]*","progress":[0-9.]*'; do sleep 2; done
+npx @wordpress/env@12.0.0 run cli wp option get wp_pcloud_backup_history --format=json
+```
+
+WP-Cron はコンテナ内から `localhost:8888` に届かないため、wp-env では自動では動きません（「接続」タブの「次回の定期チェック」が過去のままになります）。上のように外部 cron URL を呼ぶか、`wp cron event run wp_pcloud_backup_tick` を実行してください。
+
+復元リハーサル（ファイル）。コンテナの `unzip`（BusyBox）は ZIP64 を読めないので、ホストの `unzip` を使います:
+
+```
+cd ~/.wp-env/<ハッシュ>/WordPress/wp-content/wppb-remote/WPBackup/localhost/<日付>/
+ls files.zip.* | sort -t. -k3,3n | xargs cat > /tmp/files.zip
+unzip -tq /tmp/files.zip && unzip -q /tmp/files.zip -d /tmp/restored
+diff -r /tmp/restored/wp-content/uploads/fixture ~/.wp-env/<ハッシュ>/WordPress/wp-content/uploads/fixture && echo FILES_OK
+```
+
+復元リハーサル（データベース）。tests 環境（http://localhost:8889）に流し込んでテーブル数を比べます。終わったら `npx @wordpress/env@12.0.0 clean tests` で tests 環境を初期化します:
+
+```
+docker cp database.sql.gz $(docker ps -qf name=tests-cli):/tmp/database.sql.gz
+npx @wordpress/env@12.0.0 run tests-cli bash -c 'gunzip -c /tmp/database.sql.gz | wp db import - && wp db tables --all-tables'
+npx @wordpress/env@12.0.0 run cli wp db tables --all-tables
+```
+
+### pCloud 実機での確認手順
+
+本物の pCloud への送信（`CurlTransport` と `PcloudClient`）は、トークンがないと確認できません。次の手順で行います。
+
+1. リポジトリ直下に `.wp-env.override.json` を作ります（`.gitignore` 済みなので、トークンがコミットされることはありません）。`config` は `.wp-env.json` とマージされ、定数を消すことはできない（`null` はエラーになる）ので、`WP_PCLOUD_BACKUP_STORAGE_DIR` を空文字にして開発モードを外し、本物のトークンを入れます。空文字のときは pCloud に保存します。
+
+   ```json
+   {
+     "config": {
+       "WP_PCLOUD_BACKUP_STORAGE_DIR": "",
+       "WP_PCLOUD_BACKUP_ACCESS_TOKEN": "ここに本物のアクセストークン"
+     }
+   }
+   ```
+
+   EU リージョンのアカウントは `"WP_PCLOUD_BACKUP_API_HOST": "eapi.pcloud.com"` も加えます。
+
+2. `npx @wordpress/env@12.0.0 start --update` で設定を反映し、`npx @wordpress/env@12.0.0 run cli wp eval 'echo get_class(\WpPcloudBackup\Plugin::instance()->storage());'` が `WpPcloudBackup\Storage\PcloudClient` を表示することを確認します（開発モードのときは `LocalStorage`）。
+3. 管理画面の「接続」タブが「接続済み」になり、「ローカルフォルダ（開発モード）」の表記が消えていることを確認します（定数で設定したトークンはこの画面では検証されないので、トークンの誤りは次のバックアップで初めてわかります）。
+4. `bin/make-fixture-site.sh 100` のあと、「状態」タブの「今すぐバックアップ」を押して完走させます。
+5. pCloud のウェブ画面で `/WPBackup/localhost/<日付>/` に `manifest.json`、`database.sql.gz`、`files.zip.001…` があり、`.incomplete-` が残っていないことを確認します。
+6. `files.zip.001` をダウンロードし、`shasum files.zip.001`（SHA-1）が `manifest.json` の `parts[0].sha1` と一致することを確認します。
+7. 終わったら `.wp-env.override.json` を削除し、`npx @wordpress/env@12.0.0 start --update` で開発モードに戻します。
+
+翻訳テンプレート（`.pot`）の生成（コンテナ内のプラグインのフォルダ名はリポジトリのフォルダ名と同じです。`wp plugin list` で確認できます）:
+
+```
+npx @wordpress/env@12.0.0 run cli wp i18n make-pot \
+  /var/www/html/wp-content/plugins/<フォルダ名> \
+  /var/www/html/wp-content/plugins/<フォルダ名>/languages/wp-pcloud-backup.pot \
+  --domain=wp-pcloud-backup --slug=wp-pcloud-backup --exclude=vendor,tests,docs,build,node_modules,bin
 ```
 
 ## アンインストール

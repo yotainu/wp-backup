@@ -1,0 +1,694 @@
+# Copyright (C) 2026 
+# This file is distributed under the GPL-2.0-or-later.
+msgid ""
+msgstr ""
+"Project-Id-Version: WP pCloud Backup 0.1.0\n"
+"Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/wp-pcloud-backup\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"POT-Creation-Date: 2026-10-25T10:16:02+00:00\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"X-Generator: WP-CLI 2.7.1\n"
+"X-Domain: wp-pcloud-backup\n"
+
+#. Plugin Name of the plugin
+msgid "WP pCloud Backup"
+msgstr ""
+
+#. Description of the plugin
+msgid "Back up your WordPress site and upload it to pCloud."
+msgstr ""
+
+#: includes/Admin/AdminPage.php:111
+msgid "バックアップを開始しています…"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:112
+msgid "通信に失敗しました。再試行します…"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:113
+msgid "通信に失敗しました。ページを再読み込みしてください。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:114
+msgid "コピーしました"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:115
+#: includes/Admin/views/tab-connection.php:118
+#: includes/Admin/views/tab-connection.php:143
+msgid "コピー"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:116
+msgid "先に Client ID を入力してください。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:117
+msgid "バックアップを中止しますか？"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:118
+msgid "pCloud との接続を解除しますか？"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:119
+msgid "URL を再生成すると、古い URL は使えなくなります。続行しますか？"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:120
+msgid "この画面を開いたままにしてください。閉じると、サーバー側の定期実行（WP-Cron または外部 cron）が続きを処理します。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:131
+msgid "このページにアクセスする権限がありません。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:212
+msgid "設定を保存しました。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:233
+msgid "Client ID、Client Secret、認可コードをすべて入力してください。"
+msgstr ""
+
+#. translators: %s: error message from pCloud.
+#: includes/Admin/AdminPage.php:245
+msgid "トークンを取得できませんでした: %s"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:262
+msgid "アクセストークンは wp-config.php の定数で設定されているため、ここには表示できません。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:268
+msgid "パスワードが正しくありません。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:285
+msgid "アクセストークンは wp-config.php の定数で設定されているため、解除できません。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:292
+msgid "pCloud との接続を解除しました。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:302
+msgid "cron URL を再生成しました。外部 cron に新しい URL を設定してください。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:312
+msgid "バックアップ対象フォルダを自動検出の値に戻しました。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:322
+msgid "管理画面から中止"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:323
+msgid "バックアップを中止しました。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:327
+msgid "実行中のバックアップはありません。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:402
+msgid "この操作を行う権限がありません。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:418
+#: includes/Admin/views/tab-connection.php:66
+msgid "アクセストークンは wp-config.php の定数で設定済みです。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:423
+msgid "アクセストークンを入力してください。"
+msgstr ""
+
+#. translators: %s: error message from pCloud.
+#: includes/Admin/AdminPage.php:437
+msgid "pCloud に接続できませんでした: %s"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:448
+msgid "トークンを暗号化して保存できませんでした。サーバーの OpenSSL 設定を確認してください。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:453
+msgid "pCloud に接続しました。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:505
+#: includes/Admin/views/tab-connection.php:53
+msgid "状態"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:506
+msgid "設定"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:507
+msgid "接続"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:563
+msgid "毎日"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:564
+msgid "3 日ごと"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:565
+msgid "毎週"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:566
+msgid "2 週間ごと"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:567
+msgid "毎月"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:15
+msgid "PHP バージョン"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:16
+msgid "max_execution_time（秒）"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:17
+msgid "memory_limit"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:18
+msgid "zlib 拡張"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:19
+msgid "curl 拡張"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:20
+msgid "openssl 拡張（AES-256-GCM）"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:21
+msgid "作業フォルダへの書き込み"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:22
+msgid "作業フォルダの .htaccess"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:23
+msgid "Apache 系サーバー"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:24
+msgid "DISABLE_WP_CRON"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:25
+msgid "ディスク空き容量"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:26
+msgid "未完了のジョブ"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:34
+#: includes/Admin/views/tab-connection.php:42
+msgid "あり"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:34
+#: includes/Admin/views/tab-connection.php:42
+#: includes/Notifier.php:59
+msgid "なし"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:36
+msgid "可"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:36
+msgid "不可"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:38
+msgid "はい"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:38
+msgid "いいえ"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:40
+msgid "有効（WP-Cron は動きません）"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:40
+msgid "無効"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:44
+msgid "不明"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:50
+msgid "pCloud 接続"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:56
+msgid "接続済み"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:60
+msgid "ローカルフォルダ（開発モード）"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:63
+msgid "未接続"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:73
+msgid "アクセストークンを貼り付ける"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:78
+msgid "アクセストークン"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:81
+msgid "保存前に pCloud へ接続して確認します。保存したトークンは暗号化されます。EU リージョンのアカウントは wp-config.php で WP_PCLOUD_BACKUP_API_HOST に eapi.pcloud.com を指定してください。"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:85
+msgid "確認して保存"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:88
+msgid "認可コードからトークンを取得する"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:89
+msgid "pCloud のアプリ（my.pcloud.com の開発者向け設定）で作成した Client ID と Client Secret を入力し、認可ページで表示されるコードを貼り付けてください。Client ID と Client Secret は保存されません。"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:97
+msgid "認可ページを開く"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:105
+msgid "認可コード"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:109
+msgid "トークンを取得して保存"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:114
+msgid "アクセストークンを表示する"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:120
+msgid "このトークンは今回だけ表示されます。ページを再読み込みすると消えます。"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:125
+msgid "現在のパスワード"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:127
+msgid "トークンを表示"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:135
+msgid "接続を解除"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:139
+msgid "外部 cron の URL"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:140
+msgid "WP-Cron が使えないサーバーでは、この URL を 1 分ごとなど定期的に呼び出してください。URL を知っていれば誰でも実行を進められるため、他人に共有しないでください。"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:147
+msgid "URL を再生成"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:150
+#: includes/Admin/views/tab-settings.php:80
+msgid "WP-Cron"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:153
+msgid "WP-Cron で実行"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:154
+msgid "オン"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:154
+msgid "オフ（外部 cron を使用）"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:157
+msgid "次回の定期チェック"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:162
+msgid "DISABLE_WP_CRON が有効なため、WP-Cron は実行されません。上の URL を外部 cron から呼び出してください。"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:165
+msgid "サーバー診断"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:167
+msgid "nginx 環境では作業フォルダへの直接アクセスをサーバー設定で遮断してください"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:182
+msgid "要確認"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:16
+msgid "wp-config.php の定数で設定済み"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:26
+msgid "保存先"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:29
+msgid "pCloud ルートフォルダ"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:36
+msgid "サイトフォルダ名"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:39
+msgid "ルートフォルダの下に作られるフォルダ名です（英数字と . _ - のみ）。"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:43
+msgid "バックアップ対象フォルダ"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:46
+msgid "自動検出に戻す"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:47
+msgid "WordPress をサブディレクトリに設置している場合は、サイトのルートが自動検出されます。"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:52
+msgid "スケジュール"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:55
+msgid "頻度"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:66
+msgid "開始時刻"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:69
+msgid "サイトのタイムゾーンで指定します。"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:73
+msgid "保持世代数"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:82
+msgid "WP-Cron で自動実行する"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:83
+msgid "外部 cron から接続タブの URL を呼び出す場合はオフにできます。"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:88
+msgid "通知"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:91
+msgid "通知先メール"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:94
+msgid "複数ある場合はカンマで区切ります。"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:99
+msgid "成功時の通知"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:100
+msgid "成功したときもメールを送る（失敗時は常に送信）"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:104
+msgid "詳細"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:107
+msgid "除外パターン"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:110
+msgid "1 行に 1 パターン。バックアップ対象フォルダからの相対パスで、* が使えます。"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:114
+msgid "分割サイズ"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:124
+msgid "1 回の実行時間（秒）"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:127
+msgid "サーバーの実行時間制限より短くしてください。"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:131
+msgid "自動更新"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:132
+msgid "このプラグインを自動で更新する"
+msgstr ""
+
+#: includes/Admin/views/tab-settings.php:136
+msgid "設定を保存"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:14
+msgid "成功"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:15
+msgid "警告あり"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:16
+msgid "失敗"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:17
+msgid "更新"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:24
+msgid "pCloud に接続されていません。"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:25
+msgid "接続タブで設定してください。"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:32
+msgid "最終成功"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:36
+msgid "次回予定"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:41
+msgid "バックアップ"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:49
+msgid "今すぐバックアップ"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:52
+msgid "中止"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:55
+msgid "この画面を開いている間はブラウザがバックアップを進めます。"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:58
+msgid "履歴"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:62
+msgid "日時"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:63
+msgid "結果"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:64
+msgid "サイズ"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:65
+msgid "ファイル数"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:66
+msgid "所要時間"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:67
+msgid "pCloud パス"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:68
+msgid "メッセージ"
+msgstr ""
+
+#: includes/Admin/views/tab-status.php:73
+msgid "履歴はまだありません。"
+msgstr ""
+
+#. translators: 1: minutes, 2: seconds.
+#: includes/Admin/views/tab-status.php:85
+#: includes/Notifier.php:190
+msgid "%1$d分%2$d秒"
+msgstr ""
+
+#: includes/Job/JobRunner.php:1110
+msgid "バックアップが周期の2倍以上成功していません"
+msgstr ""
+
+#. translators: %s: step name.
+#: includes/Notifier.php:44
+msgid "失敗したステップ: %s"
+msgstr ""
+
+#. translators: %d: number of attempts.
+#: includes/Notifier.php:46
+msgid "試行回数: %d"
+msgstr ""
+
+#. translators: %s: error message.
+#: includes/Notifier.php:48
+msgid "エラー: %s"
+msgstr ""
+
+#: includes/Notifier.php:64
+msgid "バックアップが予定どおりに実行されていません。"
+msgstr ""
+
+#. translators: %s: date and time.
+#: includes/Notifier.php:66
+msgid "最後に成功した日時: %s"
+msgstr ""
+
+#. translators: %s: probable cause.
+#: includes/Notifier.php:68
+msgid "考えられる原因: %s"
+msgstr ""
+
+#. translators: %s: data size.
+#: includes/Notifier.php:87
+msgid "サイズ: %s"
+msgstr ""
+
+#. translators: %d: number of files.
+#: includes/Notifier.php:89
+msgid "ファイル数: %d"
+msgstr ""
+
+#. translators: %s: elapsed time.
+#: includes/Notifier.php:91
+msgid "所要時間: %s"
+msgstr ""
+
+#. translators: %s: pCloud path.
+#: includes/Notifier.php:93
+msgid "保存先: %s"
+msgstr ""
+
+#. translators: %d: number of warnings.
+#: includes/Notifier.php:102
+msgid "警告 (%d 件):"
+msgstr ""
+
+#. translators: %d: number of omitted warnings.
+#: includes/Notifier.php:108
+msgid "…他 %d 件"
+msgstr ""
+
+#: includes/Notifier.php:121
+msgid "プラグインの自動更新に失敗しました。"
+msgstr ""
+
+#. translators: %s: reason.
+#: includes/Notifier.php:123
+msgid "理由: %s"
+msgstr ""
+
+#. translators: %s: site host name.
+#: includes/Notifier.php:142
+msgid "サイト: %s"
+msgstr ""
+
+#. translators: 1: hours, 2: minutes, 3: seconds.
+#: includes/Notifier.php:186
+msgid "%1$d時間%2$d分%3$d秒"
+msgstr ""
+
+#. translators: %d: seconds.
+#: includes/Notifier.php:194
+msgid "%d秒"
+msgstr ""
+
+#: includes/Scheduler.php:99
+msgid "Every minute (WP pCloud Backup)"
+msgstr ""
+
+#: includes/Trigger.php:170
+msgid "pCloud に接続されていません"
+msgstr ""
+
+#: includes/Updater.php:267
+msgid "更新パッケージの検証に失敗しました（SHA-256 不一致）"
+msgstr ""
+
+#: includes/Updater.php:327
+msgid "更新パッケージの検証用チェックサムを取得できませんでした"
+msgstr ""
