@@ -183,8 +183,17 @@ class Settings {
 	/**
 	 * Write only the given keys on top of a fresh read of the option, so a cron
 	 * process and an admin save in different requests do not overwrite each other.
+	 *
+	 * The cached copy of the option is dropped first, because get_option() would
+	 * otherwise serve the alloptions cache loaded at request start (stale in a
+	 * long-running cron request). A small read-then-write window remains.
 	 */
 	private function save( array $changes ): void {
+		if ( function_exists( 'wp_cache_delete' ) ) {
+			wp_cache_delete( self::OPTION, 'options' );
+			wp_cache_delete( 'alloptions', 'options' );
+		}
+
 		$option       = get_option( self::OPTION, array() );
 		$this->stored = array_merge( is_array( $option ) ? $option : array(), $changes );
 		update_option( self::OPTION, $this->stored, true );

@@ -50,6 +50,7 @@ final class SettingsTest extends TestCase {
 				return true;
 			}
 		);
+		Functions\when( 'wp_cache_delete' )->justReturn( true );
 		Functions\when( 'home_url' )->justReturn( 'https://example.com/blog' );
 		Functions\when( 'sanitize_email' )->alias(
 			function ( $email ) {
@@ -208,6 +209,35 @@ final class SettingsTest extends TestCase {
 		$settings->update( array( 'keep' => 5 ) );
 
 		$this->assertSame( array( 'keep' => 5, 'last_success' => 123 ), $this->options[ Settings::OPTION ] );
+	}
+
+	public function test_save_busts_option_cache_before_reading(): void {
+		$calls = array();
+		Functions\when( 'wp_cache_delete' )->alias(
+			function ( $key, $group = '' ) use ( &$calls ) {
+				$calls[] = "delete:$group:$key";
+				return true;
+			}
+		);
+		Functions\when( 'get_option' )->alias(
+			function ( $name, $default = false ) use ( &$calls ) {
+				if ( Settings::OPTION === $name ) {
+					$calls[] = "get:$name";
+				}
+				return $default;
+			}
+		);
+
+		( new Settings() )->update( array( 'keep' => 5 ) );
+
+		$this->assertSame(
+			array(
+				'delete:options:' . Settings::OPTION,
+				'delete:options:alloptions',
+				'get:' . Settings::OPTION,
+			),
+			$calls
+		);
 	}
 
 	public function test_save_does_not_resurrect_stale_values_of_untouched_keys(): void {
