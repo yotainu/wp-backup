@@ -169,12 +169,18 @@ class FileScanner {
 	 * @param string   $path    Absolute path.
 	 */
 	private function appendFile( $handle, string $relPath, string $path ): void {
-		$size = (int) filesize( $path );
+		$stat = $this->statFile( $path );
+		if ( null === $stat ) {
+			$this->warnings[] = 'unreadable file: ' . $relPath;
+			return;
+		}
+
+		$size = $stat['size'];
 		$line = json_encode(
 			array(
 				'p' => $relPath,
 				's' => $size,
-				'm' => (int) filemtime( $path ),
+				'm' => $stat['mtime'],
 			),
 			JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
 		);
@@ -190,15 +196,54 @@ class FileScanner {
 	}
 
 	/**
+	 * Read size and mtime of a file, tolerating it vanishing after is_file().
+	 *
+	 * @param string $path Absolute path.
+	 * @return array|null ['size' => int, 'mtime' => int], or null if it cannot be stat'ed.
+	 */
+	protected function statFile( string $path ): ?array {
+		$size  = @filesize( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		$mtime = @filemtime( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+
+		if ( false === $size || false === $mtime ) {
+			return null;
+		}
+
+		return array(
+			'size'  => (int) $size,
+			'mtime' => (int) $mtime,
+		);
+	}
+
+	/**
 	 * Whether a relative path matches any exclude entry.
+	 *
+	 * An exclude containing a `/` is anchored at the root: it matches the path
+	 * itself or anything below it; a trailing `*` makes it a prefix match.
+	 * An exclude without `/` (e.g. `.git`, `node_modules`, `cache*`) matches any
+	 * entry whose basename equals it (or starts with it when it ends in `*`),
+	 * at any depth. Matching is case-sensitive.
 	 */
 	private function isExcluded( string $relPath ): bool {
+		$slash    = strrpos( $relPath, '/' );
+		$basename = false === $slash ? $relPath : substr( $relPath, $slash + 1 );
+
 		foreach ( $this->excludes as $exclude ) {
+			$wildcard = '*' === substr( $exclude, -1 );
+			$prefix   = $wildcard ? substr( $exclude, 0, -1 ) : $exclude;
+
+			if ( false === strpos( $exclude, '/' ) ) {
+				if ( $basename === $exclude || ( $wildcard && 0 === strpos( $basename, $prefix ) ) ) {
+					return true;
+				}
+				continue;
+			}
+
 			if ( $relPath === $exclude || 0 === strpos( $relPath, $exclude . '/' ) ) {
 				return true;
 			}
 
-			if ( '*' === substr( $exclude, -1 ) && 0 === strpos( $relPath, substr( $exclude, 0, -1 ) ) ) {
+			if ( $wildcard && 0 === strpos( $relPath, $prefix ) ) {
 				return true;
 			}
 		}

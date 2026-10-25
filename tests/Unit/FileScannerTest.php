@@ -191,4 +191,75 @@ final class FileScannerTest extends TestCase {
 		);
 		$this->assertContains( 'unreadable directory: missing-dir', $scanner->state()['warnings'] );
 	}
+
+	/**
+	 * Create files below the test root.
+	 *
+	 * @param string[] $files Relative paths.
+	 */
+	private function addFiles( array $files ): void {
+		foreach ( $files as $file ) {
+			$path = $this->root . '/' . $file;
+			if ( ! is_dir( dirname( $path ) ) ) {
+				mkdir( dirname( $path ), 0755, true );
+			}
+			file_put_contents( $path, 'x' );
+		}
+	}
+
+	public function test_bare_excludes_match_at_any_depth(): void {
+		$this->addFiles(
+			array(
+				'wp-content/themes/x/.git/config',
+				'wp-content/plugins/p/node_modules/a.js',
+				'.github/workflows/ci.yml',
+				'other/wp-content/cache/x',
+				'wp-content/plugins/p/cache-tmp/y',
+			)
+		);
+
+		$scanner = new FileScanner(
+			$this->root,
+			array( '.git', 'node_modules', 'wp-content/cache', 'cache-*' ),
+			$this->out . '/filelist.jsonl'
+		);
+		$scanner->run(
+			static function (): bool {
+				return false;
+			}
+		);
+
+		$paths = array_column( $this->readList(), 'p' );
+		$this->assertNotContains( 'wp-content/themes/x/.git/config', $paths );
+		$this->assertNotContains( 'wp-content/plugins/p/node_modules/a.js', $paths );
+		$this->assertNotContains( 'wp-content/plugins/p/cache-tmp/y', $paths );
+		$this->assertContains( '.github/workflows/ci.yml', $paths );
+		$this->assertContains( 'other/wp-content/cache/x', $paths );
+		$this->assertNotContains( 'wp-content/cache/c.txt', $paths );
+	}
+
+	public function test_file_that_cannot_be_stated_is_warned_and_skipped(): void {
+		$scanner = new class( $this->root, array(), $this->out . '/filelist.jsonl' ) extends FileScanner {
+			protected function statFile( string $path ): ?array {
+				if ( substr( $path, -6 ) === '/a.txt' ) {
+					return null;
+				}
+
+				return parent::statFile( $path );
+			}
+		};
+		$this->assertTrue(
+			$scanner->run(
+				static function (): bool {
+					return false;
+				}
+			)
+		);
+
+		$paths = array_column( $this->readList(), 'p' );
+		$this->assertNotContains( 'a.txt', $paths );
+		$this->assertCount( 4, $paths );
+		$this->assertContains( 'unreadable file: a.txt', $scanner->state()['warnings'] );
+		$this->assertSame( 4, $scanner->state()['files'] );
+	}
 }
