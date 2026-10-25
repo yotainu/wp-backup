@@ -879,6 +879,11 @@ final class JobRunner {
 				$raw = fgets( $handle );
 
 				if ( false === $raw ) {
+					$expected = (int) $this->state->get( 'scan_lines', 0 );
+					if ( $line !== $expected ) {
+						// Never finish an archive that silently lacks listed files.
+						throw new \RuntimeException( sprintf( 'The file list ended after %d of %d lines.', $line, $expected ) );
+					}
 					$zip->finish();
 					$this->state->merge( $progress() );
 					$this->state->set( 'return_to', 'finalize' );

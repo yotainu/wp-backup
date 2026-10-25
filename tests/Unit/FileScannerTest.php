@@ -288,4 +288,19 @@ final class FileScannerTest extends TestCase {
 		$scanner->run( $never );
 		$this->assertSame( array(), $scanner->state()['warnings'] );
 	}
+	public function test_a_short_write_to_the_list_throws(): void {
+		if ( ! is_writable( '/dev/full' ) ) {
+			$this->markTestSkipped( '/dev/full is not available.' );
+		}
+
+		$scanner = new FileScanner( $this->root, array(), '/dev/full' );
+
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'Cannot write the file list' );
+		$scanner->run(
+			static function (): bool {
+				return false;
+			}
+		);
+	}
 }

@@ -1357,4 +1357,27 @@ final class JobRunnerTest extends TestCase {
 		$this->assertSame( $this->site, $manifest['backup_root'] );
 		$this->assertSame( array( 'cache' ), $manifest['excludes'] );
 	}
+	public function test_zip_refuses_to_finish_when_the_file_list_lost_lines(): void {
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+		for ( $i = 0; $i < self::MAX_RUNS && 'zip' !== $this->readState()['step']; $i++ ) {
+			$runner->run();
+		}
+		$state = $this->readState();
+		$this->assertSame( 'zip', $state['step'] );
+
+		// The last listed line is gone (e.g. lost on a full disk); scan_lines still counts it.
+		$list  = $this->workDir->path( 'filelist.jsonl' );
+		$lines = file( $list );
+		array_pop( $lines );
+		file_put_contents( $list, implode( '', $lines ) );
+		$this->assertLessThan( $state['scan_lines'], count( $lines ) );
+
+		$this->runToEnd( $runner );
+
+		$history = ( new History() )->all();
+		$this->assertSame( 'failed', $history[0]['result'] );
+		$this->assertSame( sprintf( 'The file list ended after %d of %d lines.', count( $lines ), $state['scan_lines'] ), $history[0]['message'] );
+		$this->assertSame( array(), $this->remoteFolders(), 'no generation without every listed file' );
+	}
 }

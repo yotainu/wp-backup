@@ -205,7 +205,11 @@ class FileScanner {
 			return;
 		}
 
-		fwrite( $handle, $line . "\n" );
+		$line .= "\n";
+		if ( @fwrite( $handle, $line ) !== strlen( $line ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			// A lost line would silently drop the file from the backup.
+			throw new \RuntimeException( 'Cannot write the file list: ' . basename( $this->listFile ) );
+		}
 		++$this->files;
 		$this->bytes += $size;
 
