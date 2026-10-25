@@ -143,6 +143,12 @@ final class PartWriterTest extends TestCase {
 		$this->assertSame( '0123456XYZABCDEFGHIJ', $this->concatenated() );
 		$this->assertSame( 20, $writer->offset() );
 		$this->assertCount( 2, $writer->completedParts() );
+
+		// The re-completed part is hashed from its final content, not from before the truncate.
+		$parts = $writer->completedParts();
+		$this->assertSame( sha1_file( $this->dir . '/files.zip.001' ), $parts[0]['sha1'] );
+		$this->assertSame( hash_file( 'sha256', $this->dir . '/files.zip.001' ), $parts[0]['sha256'] );
+		$this->assertSame( '0123456XYZ', file_get_contents( $this->dir . '/files.zip.001' ) );
 	}
 
 	public function test_truncate_at_part_boundary_keeps_completed_part(): void {
@@ -308,6 +314,59 @@ final class PartWriterTest extends TestCase {
 
 		$second->write( 'abcde' );
 		$this->assertSame( '01234abcde', $this->concatenated() );
+	}
+
+	public function test_resume_at_boundary_discards_stale_current_part(): void {
+		$first = new PartWriter( $this->dir, 'files.zip', 10 );
+		$first->write( '0123456789' );
+		$state = $first->state();
+		unset( $first );
+
+		// A crashed run wrote beyond the saved state.
+		file_put_contents( $this->dir . '/files.zip.002', 'STALE' );
+
+		$second = new PartWriter( $this->dir, 'files.zip', 10, $state );
+		$second->write( 'abcde' );
+		$second->finish();
+
+		$this->assertSame( 5, filesize( $this->dir . '/files.zip.002' ) );
+		$this->assertSame( '0123456789abcde', $this->concatenated() );
+	}
+
+	public function test_resume_mid_part_discards_stale_later_parts(): void {
+		$first = new PartWriter( $this->dir, 'files.zip', 10 );
+		$first->write( '01234' );
+		$state = $first->state();
+		unset( $first );
+
+		file_put_contents( $this->dir . '/files.zip.003', 'STALE' );
+		file_put_contents( $this->dir . '/files.zip.002', 'STALE' );
+		file_put_contents( $this->dir . '/other.zip.002', 'KEEP' );
+
+		$second = new PartWriter( $this->dir, 'files.zip', 10, $state );
+		$this->assertSame( array( 'files.zip.001' ), $this->names() );
+		$this->assertFileExists( $this->dir . '/other.zip.002' );
+
+		$second->write( '56789abcdefghijklmn' );
+		$second->finish();
+
+		$this->assertSame( '0123456789abcdefghijklmn', $this->concatenated() );
+		$this->assertSame( 4, filesize( $this->dir . '/files.zip.003' ) );
+	}
+
+	public function test_resume_rejects_current_size_beyond_part_size(): void {
+		$this->expectException( \InvalidArgumentException::class );
+		new PartWriter(
+			$this->dir,
+			'files.zip',
+			10,
+			array(
+				'current_index' => 1,
+				'current_size'  => 11,
+				'offset'        => 11,
+				'parts'         => array(),
+			)
+		);
 	}
 
 	public function test_resume_throws_when_current_part_is_shorter_or_missing(): void {

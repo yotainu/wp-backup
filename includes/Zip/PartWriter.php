@@ -68,7 +68,7 @@ class PartWriter {
 	 * @param int    $partSize Maximum part size in bytes (must be positive).
 	 * @param array  $state    A value returned by state(), to resume from.
 	 *
-	 * @throws \InvalidArgumentException If the part size is not positive.
+	 * @throws \InvalidArgumentException If the part size is not positive or the saved current size is out of range.
 	 * @throws \RuntimeException         If the saved current part is shorter than recorded or missing.
 	 */
 	public function __construct( string $dir, string $baseName, int $partSize, array $state = array() ) {
@@ -88,6 +88,12 @@ class PartWriter {
 		$this->currentIndex = (int) ( $state['current_index'] ?? 1 );
 		$this->currentSize  = (int) ( $state['current_size'] ?? 0 );
 
+		if ( $this->currentSize < 0 || $this->currentSize > $this->partSize ) {
+			throw new \InvalidArgumentException( 'Saved current size is out of range.' );
+		}
+
+		$this->discardStaleParts();
+
 		if ( $this->currentSize > 0 ) {
 			$path = $this->pathFor( $this->currentIndex );
 			clearstatcache( true, $path );
@@ -101,7 +107,7 @@ class PartWriter {
 				throw new \RuntimeException( sprintf( 'Could not trim part file: %s', $path ) );
 			}
 
-			$this->openCurrent();
+			$this->openCurrent( true );
 		}
 	}
 
@@ -125,7 +131,7 @@ class PartWriter {
 
 		while ( $position < $length ) {
 			if ( null === $this->handle ) {
-				$this->openCurrent();
+				$this->openCurrent( false );
 			}
 
 			$chunk = substr( $bytes, $position, $this->partSize - $this->currentSize );
@@ -266,7 +272,7 @@ class PartWriter {
 		$this->parts        = array_slice( $this->parts, 0, $keep );
 		$this->currentIndex = $kept['index'];
 		$this->currentSize  = $offset - $kept['start'];
-		$this->openCurrent();
+		$this->openCurrent( true );
 	}
 
 	/**
@@ -345,13 +351,46 @@ class PartWriter {
 	}
 
 	/**
-	 * Open the current part for appending.
+	 * Delete part files the restored state does not cover.
+	 *
+	 * A crashed run may have written past the saved state: files after the
+	 * current index, and (at a part boundary) a partly written current file.
+	 *
+	 * @throws \RuntimeException If a stale file cannot be deleted.
+	 */
+	private function discardStaleParts(): void {
+		$names = is_dir( $this->dir ) ? scandir( $this->dir ) : false;
+
+		if ( false === $names ) {
+			return;
+		}
+
+		$pattern = '/^' . preg_quote( $this->baseName, '/' ) . '\.(\d+)$/';
+
+		foreach ( $names as $name ) {
+			if ( 1 !== preg_match( $pattern, $name, $matches ) ) {
+				continue;
+			}
+
+			$index = (int) $matches[1];
+			$stale = $index > $this->currentIndex || ( $index === $this->currentIndex && 0 === $this->currentSize );
+
+			if ( $stale && ! unlink( $this->dir . '/' . $name ) ) {
+				throw new \RuntimeException( sprintf( 'Could not delete stale part file: %s', $this->dir . '/' . $name ) );
+			}
+		}
+	}
+
+	/**
+	 * Open the current part.
+	 *
+	 * @param bool $append True to append to a reconciled existing file; false to start a fresh (truncated) file.
 	 *
 	 * @throws \RuntimeException If the file cannot be opened.
 	 */
-	private function openCurrent(): void {
+	private function openCurrent( bool $append ): void {
 		$path   = $this->pathFor( $this->currentIndex );
-		$handle = fopen( $path, 'ab' );
+		$handle = fopen( $path, $append ? 'ab' : 'wb' );
 
 		if ( false === $handle ) {
 			throw new \RuntimeException( sprintf( 'Could not open part file: %s', $path ) );
