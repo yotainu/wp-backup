@@ -214,9 +214,9 @@ final class DbDumperTest extends TestCase {
 		);
 		$this->assertSame(
 			array(
-				'SELECT * FROM `wp_empty` ORDER BY `id` LIMIT 1000 OFFSET 0',
+				'SELECT * FROM `wp_empty` ORDER BY `id` LIMIT 1000',
 				'SELECT * FROM `wp_nopk` LIMIT 200 OFFSET 0', // A text column: smaller pages.
-				'SELECT * FROM `wp_twopks` ORDER BY `a`, `b` LIMIT 1000 OFFSET 0',
+				'SELECT * FROM `wp_twopks` ORDER BY `a`, `b` LIMIT 1000',
 			),
 			$selects
 		);
@@ -271,11 +271,11 @@ final class DbDumperTest extends TestCase {
 		$this->assertTrue( $dumper->dump( $this->noLimit() ) );
 
 		$this->assertContains(
-			"SELECT * FROM `wp_options` WHERE option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%' ORDER BY `option_id` LIMIT 1000 OFFSET 0",
+			"SELECT * FROM `wp_options` WHERE option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%' ORDER BY `option_id` LIMIT 1000",
 			$wpdb->queries
 		);
 		// Other tables are not filtered.
-		$this->assertContains( 'SELECT * FROM `wp_things` ORDER BY `id` LIMIT 1000 OFFSET 0', $wpdb->queries );
+		$this->assertContains( 'SELECT * FROM `wp_things` ORDER BY `id` LIMIT 1000', $wpdb->queries );
 
 		$sql = file_get_contents( $this->sqlFile() );
 		$this->assertStringContainsString( "'siteurl'", $sql );
@@ -340,8 +340,9 @@ final class DbDumperTest extends TestCase {
 		$resumed = new DbDumper( $wpdb2, $this->sqlFile(), $this->gzFile(), $state, 2 );
 		$this->assertTrue( $resumed->dump( $this->noLimit() ) );
 
-		// The resumed run starts at the saved offset and does not re-read the table's metadata.
-		$this->assertSame( 'SELECT * FROM `wp_things` ORDER BY `id` LIMIT 2 OFFSET 2', $wpdb2->queries[0] );
+		// The resumed run continues after the last dumped key and does not re-read the table's metadata.
+		$this->assertSame( array( '2' ), $state['last_key'] );
+		$this->assertSame( 'SELECT * FROM `wp_things` WHERE `id` > 2 ORDER BY `id` LIMIT 2', $wpdb2->queries[0] );
 		$this->assertNotContains( 'SHOW CREATE TABLE `wp_things`', $wpdb2->queries );
 	}
 
@@ -563,7 +564,7 @@ final class DbDumperTest extends TestCase {
 
 		$this->assertTrue( $dumper->dump( $this->noLimit() ) );
 
-		$this->assertContains( 'SELECT * FROM `wp_posts` ORDER BY `id` LIMIT 200 OFFSET 0', $wpdb->queries, 'longtext: pages of 200 rows' );
+		$this->assertContains( 'SELECT * FROM `wp_posts` ORDER BY `id` LIMIT 200', $wpdb->queries, 'longtext: pages of 200 rows' );
 
 		$sql        = file_get_contents( $this->sqlFile() );
 		$statements = array_values(
@@ -610,5 +611,148 @@ final class DbDumperTest extends TestCase {
 		$resumed = new DbDumper( $wpdb2, $this->sqlFile(), $this->gzFile(), json_decode( json_encode( $dumper->state() ), true ), 2 );
 		$this->assertTrue( $resumed->dump( $this->noLimit() ) );
 		$this->assertSame( 5, $resumed->state()['rows'] );
+	}
+	/**
+	 * wp_things with ids 2, 4, ..., 20.
+	 */
+	private function evenRows(): array {
+		$rows = array();
+		for ( $i = 2; $i <= 20; $i += 2 ) {
+			$rows[] = array(
+				'id'   => (string) $i,
+				'name' => 'n' . $i,
+			);
+		}
+
+		return $rows;
+	}
+
+	/**
+	 * Dump the first page (3 rows), let $change modify the live table, then resume to the end.
+	 *
+	 * @return int[] Dumped ids in file order.
+	 */
+	private function dumpAcrossAChange( callable $change ): array {
+		$wpdb   = new FakeWpdb( array( 'wp_things' => $this->simpleTable( $this->evenRows() ) ) );
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), array(), 3 );
+		$this->assertFalse( $dumper->dump( $this->stopNow() ) );
+		$this->assertSame( array( '6' ), $dumper->state()['last_key'] );
+
+		$change( $wpdb );
+
+		$resumed = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), json_decode( json_encode( $dumper->state() ), true ), 3 );
+		$this->assertTrue( $resumed->dump( $this->noLimit() ) );
+
+		preg_match_all( "/^\\((\\d+), 'n\\d+'\\)[,;]$/m", (string) file_get_contents( $this->sqlFile() ), $m );
+
+		return array_map( 'intval', $m[1] );
+	}
+
+	public function test_row_inserted_below_the_cursor_between_pages_causes_no_duplicate(): void {
+		$ids = $this->dumpAcrossAChange(
+			static function ( FakeWpdb $wpdb ): void {
+				$wpdb->insertRow(
+					'wp_things',
+					array(
+						'id'   => '1',
+						'name' => 'n1',
+					)
+				);
+			}
+		);
+
+		// With OFFSET 3 the second page would have started at id 6 again.
+		$this->assertSame( array( 2, 4, 6, 8, 10, 12, 14, 16, 18, 20 ), $ids );
+	}
+
+	public function test_row_deleted_below_the_cursor_between_pages_causes_no_skip(): void {
+		$ids = $this->dumpAcrossAChange(
+			static function ( FakeWpdb $wpdb ): void {
+				$wpdb->deleteRows(
+					'wp_things',
+					static function ( array $row ): bool {
+						return '4' === $row['id'];
+					}
+				);
+			}
+		);
+
+		// With OFFSET 3 the second page would have started at id 10, skipping 8.
+		$this->assertSame( array( 2, 4, 6, 8, 10, 12, 14, 16, 18, 20 ), $ids );
+	}
+
+	public function test_rows_inserted_above_the_cursor_are_dumped_in_key_order(): void {
+		$ids = $this->dumpAcrossAChange(
+			static function ( FakeWpdb $wpdb ): void {
+				$wpdb->insertRow(
+					'wp_things',
+					array(
+						'id'   => '7',
+						'name' => 'n7',
+					)
+				);
+			}
+		);
+
+		$this->assertSame( array( 2, 4, 6, 7, 8, 10, 12, 14, 16, 18, 20 ), $ids );
+	}
+
+	public function test_composite_and_string_keys_use_a_row_constructor(): void {
+		$rows = array();
+		foreach ( array( 'a', "o'b", 'z' ) as $name ) {
+			for ( $i = 1; $i <= 2; $i++ ) {
+				$rows[] = array(
+					'grp'  => $name,
+					'n'    => (string) $i,
+				);
+			}
+		}
+		$table = array(
+			'create'  => 'CREATE TABLE `wp_meta` (...)',
+			'columns' => array(
+				array(
+					'Field' => 'grp',
+					'Type'  => 'varchar(20)',
+					'Key'   => 'PRI',
+				),
+				array(
+					'Field' => 'n',
+					'Type'  => 'int(11)',
+					'Key'   => 'PRI',
+				),
+			),
+			'rows'    => $rows,
+		);
+		$wpdb  = new FakeWpdb( array( 'wp_meta' => $table ) );
+
+		$state = array();
+		do {
+			$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), $state, 4 );
+			$done   = $dumper->dump( $this->stopNow() );
+			$state  = json_decode( json_encode( $dumper->state() ), true );
+		} while ( ! $done );
+
+		$this->assertContains( "SELECT * FROM `wp_meta` WHERE (`grp`, `n`) > ('o\\'b', 2) ORDER BY `grp`, `n` LIMIT 4", $wpdb->queries );
+		$this->assertSame( 6, $state['rows'] );
+		$sql = (string) file_get_contents( $this->sqlFile() );
+		$this->assertSame( 1, substr_count( $sql, "('o\\'b', 2)" ) );
+		$this->assertSame( 1, substr_count( $sql, "('z', 2)" ) );
+	}
+
+	public function test_state_saved_before_keyset_paging_resumes_with_its_offset(): void {
+		$wpdb   = new FakeWpdb( array( 'wp_things' => $this->simpleTable( $this->evenRows() ) ) );
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), array(), 3 );
+		$this->assertFalse( $dumper->dump( $this->stopNow() ) );
+
+		// A job started by the previous version: offset only, no last_key.
+		$state = $dumper->state();
+		unset( $state['last_key'], $state['page'] );
+
+		$resumed = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), $state, 3 );
+		$this->assertTrue( $resumed->dump( $this->noLimit() ) );
+
+		$this->assertContains( 'SELECT * FROM `wp_things` ORDER BY `id` LIMIT 3 OFFSET 3', $wpdb->queries );
+		$this->assertContains( 'SELECT * FROM `wp_things` WHERE `id` > 12 ORDER BY `id` LIMIT 3', $wpdb->queries );
+		$this->assertSame( 10, $resumed->state()['rows'] );
 	}
 }

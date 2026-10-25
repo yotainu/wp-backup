@@ -8,7 +8,9 @@ namespace WpPcloudBackup\Db;
  * Both stages work in short runs: dump() and compress() return false when the
  * time budget is used up, and state() returns what is needed to continue
  * with a new instance. The dump walks tables in name order and pages each
- * table with LIMIT/OFFSET (ordered by primary key when there is one), writing
+ * table by primary key (keyset: WHERE (pk...) > (last key...) ORDER BY pk LIMIT n,
+ * so rows inserted or deleted between runs neither repeat nor shift later rows),
+ * or with LIMIT/OFFSET when the table has no primary key, writing
  * INSERT statements of at most MAX_STATEMENT_BYTES (one per page for small rows).
  * Tables with text/blob/json columns use pages of LARGE_ROW_PAGE rows.
  * Pure PHP: no WordPress functions are used.
@@ -100,6 +102,7 @@ class DbDumper {
 				'pk'              => array(),
 				'types'           => array(),
 				'page'            => 0,
+				'last_key'        => null,
 				'sql_bytes'       => 0,
 				'gz_bytes'        => 0,
 			),
@@ -118,7 +121,8 @@ class DbDumper {
 	 *
 	 * Keys: tables, table_index, offset, phase ('dump'|'compress'|'done'),
 	 * compress_offset, rows, columns, pk, types, page (rows per SELECT of the
-	 * current table), sql_bytes (bytes written to
+	 * current table), last_key (primary key values of the last dumped row of the
+	 * current table, null before the first page), sql_bytes (bytes written to
 	 * the SQL file), gz_bytes (bytes of the gzip file after the last run).
 	 * On resume, output files are truncated back to these sizes.
 	 */
@@ -170,6 +174,18 @@ class DbDumper {
 				$this->appendInserts( $table, $rows );
 				$this->state['offset'] += $n;
 				$this->state['rows']   += $n;
+
+				if ( array() !== $this->state['pk'] ) {
+					$last = $rows[ $n - 1 ];
+					$key  = array();
+					foreach ( $this->state['pk'] as $column ) {
+						if ( ! isset( $last[ $column ] ) ) {
+							throw new \RuntimeException( 'Primary key column missing in the result of ' . $table );
+						}
+						$key[] = (string) $last[ $column ];
+					}
+					$this->state['last_key'] = $key;
+				}
 			}
 			unset( $rows );
 
@@ -179,7 +195,8 @@ class DbDumper {
 				$this->state['columns'] = array();
 				$this->state['pk']      = array();
 				$this->state['types']   = array();
-				$this->state['page']    = 0;
+				$this->state['page']     = 0;
+				$this->state['last_key'] = null;
 			}
 
 			if ( $timeUp() ) {
@@ -290,7 +307,8 @@ class DbDumper {
 		$this->state['columns'] = array();
 		$this->state['pk']      = array();
 		$this->state['types']   = array();
-		$this->state['page']    = $this->batch;
+		$this->state['page']     = $this->batch;
+		$this->state['last_key'] = null;
 		foreach ( $columns as $column ) {
 			$this->state['columns'][] = $column['Field'];
 			if ( 'PRI' === $column['Key'] ) {
@@ -320,19 +338,56 @@ class DbDumper {
 	 * @return array[]
 	 */
 	private function fetchPage( string $table, int $page ): array {
-		$sql = 'SELECT * FROM ' . $this->ident( $table );
+		$sql   = 'SELECT * FROM ' . $this->ident( $table );
+		$where = array();
+		$pk    = $this->state['pk'];
+		$key   = $this->state['last_key'];
 
 		if ( $table === $this->wpdb->options ) {
-			$sql .= " WHERE option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%'";
+			$where[] = "option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%'";
 		}
 
-		if ( array() !== $this->state['pk'] ) {
-			$sql .= ' ORDER BY ' . implode( ', ', array_map( array( $this, 'ident' ), $this->state['pk'] ) );
+		$keyset = array() !== $pk && is_array( $key ) && count( $key ) === count( $pk );
+		if ( $keyset ) {
+			$where[] = $this->keyCondition( $pk, $key );
 		}
 
-		$sql .= ' LIMIT ' . $page . ' OFFSET ' . $this->state['offset'];
+		if ( array() !== $where ) {
+			$sql .= ' WHERE ' . implode( ' AND ', $where );
+		}
+
+		if ( array() !== $pk ) {
+			$sql .= ' ORDER BY ' . implode( ', ', array_map( array( $this, 'ident' ), $pk ) );
+		}
+
+		$sql .= ' LIMIT ' . $page;
+
+		// Without a primary key (or for a state saved before keyset paging) the offset is the cursor.
+		if ( ! $keyset && ( array() === $pk || $this->state['offset'] > 0 ) ) {
+			$sql .= ' OFFSET ' . $this->state['offset'];
+		}
 
 		return $this->results( $sql );
+	}
+
+	/**
+	 * "`a` > 1" or "(`a`, `b`) > (1, 'x')": rows after the last dumped key, in ORDER BY pk order.
+	 *
+	 * @param string[] $pk  Primary key columns.
+	 * @param string[] $key Values of those columns in the last dumped row.
+	 */
+	private function keyCondition( array $pk, array $key ): string {
+		$columns = array_map( array( $this, 'ident' ), $pk );
+		$values  = array();
+		foreach ( array_values( $pk ) as $i => $column ) {
+			$values[] = $this->literal( $key[ $i ], $this->state['types'][ $column ] ?? 'string' );
+		}
+
+		if ( 1 === count( $pk ) ) {
+			return $columns[0] . ' > ' . $values[0];
+		}
+
+		return '(' . implode( ', ', $columns ) . ') > (' . implode( ', ', $values ) . ')';
 	}
 
 	/**
