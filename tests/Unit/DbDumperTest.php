@@ -1,0 +1,380 @@
+<?php
+
+namespace WpPcloudBackup\Tests\Unit;
+
+use PHPUnit\Framework\TestCase;
+use WpPcloudBackup\Db\DbDumper;
+use WpPcloudBackup\Tests\Support\FakeWpdb;
+use WpPcloudBackup\Tests\Support\TempDir;
+
+final class DbDumperTest extends TestCase {
+
+	/**
+	 * Temporary output directory.
+	 *
+	 * @var string
+	 */
+	private $dir;
+
+	protected function setUp(): void {
+		$this->dir = TempDir::create();
+	}
+
+	protected function tearDown(): void {
+		TempDir::remove( $this->dir );
+	}
+
+	private function sqlFile(): string {
+		return $this->dir . '/db.sql';
+	}
+
+	private function gzFile(): string {
+		return $this->dir . '/db.sql.gz';
+	}
+
+	private function noLimit(): callable {
+		return static function () {
+			return false;
+		};
+	}
+
+	private function stopNow(): callable {
+		return static function () {
+			return true;
+		};
+	}
+
+	/**
+	 * A small table with a primary key.
+	 */
+	private function simpleTable( array $rows ): array {
+		return array(
+			'create'  => 'CREATE TABLE `wp_things` (`id` bigint(20) NOT NULL, `name` varchar(50) DEFAULT NULL, PRIMARY KEY (`id`))',
+			'columns' => array(
+				array(
+					'Field' => 'id',
+					'Type'  => 'bigint(20)',
+					'Key'   => 'PRI',
+				),
+				array(
+					'Field' => 'name',
+					'Type'  => 'varchar(50)',
+					'Key'   => '',
+				),
+			),
+			'rows'    => $rows,
+		);
+	}
+
+	public function test_header_and_create_table(): void {
+		$wpdb   = new FakeWpdb( array( 'wp_things' => $this->simpleTable( array( array( 'id' => '1', 'name' => 'a' ) ) ) ) );
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile() );
+
+		$this->assertTrue( $dumper->dump( $this->noLimit() ) );
+
+		$sql = file_get_contents( $this->sqlFile() );
+		$this->assertSame(
+			"-- WP pCloud Backup SQL dump\nSET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS=0;\nSET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';\n"
+			. "DROP TABLE IF EXISTS `wp_things`;\n"
+			. "CREATE TABLE `wp_things` (`id` bigint(20) NOT NULL, `name` varchar(50) DEFAULT NULL, PRIMARY KEY (`id`));\n"
+			. "INSERT INTO `wp_things` (`id`, `name`) VALUES\n(1, 'a');\n"
+			. "SET FOREIGN_KEY_CHECKS=1;\n",
+			$sql
+		);
+		$this->assertSame( 'compress', $dumper->state()['phase'] );
+		$this->assertSame( 1, $dumper->state()['rows'] );
+	}
+
+	public function test_insert_batches_and_escaping(): void {
+		$rows = array(
+			array(
+				'id'   => '1',
+				'name' => "O'Reilly",
+				'data' => "\x00\xff",
+				'note' => 'a\\b',
+			),
+			array(
+				'id'   => '2',
+				'name' => "line\nbreak",
+				'data' => '',
+				'note' => "cr\r \"q\" nul\0 sub\x1a",
+			),
+			array(
+				'id'   => '3',
+				'name' => '寿司 🍣',
+				'data' => null,
+				'note' => null,
+			),
+		);
+		for ( $i = 4; $i <= 2500; $i++ ) {
+			$rows[] = array(
+				'id'   => (string) $i,
+				'name' => 'n' . $i,
+				'data' => 'x',
+				'note' => '1.5e3',
+			);
+		}
+
+		$wpdb = new FakeWpdb(
+			array(
+				'wp_big' => array(
+					'create'  => 'CREATE TABLE `wp_big` (...)',
+					'columns' => array(
+						array(
+							'Field' => 'id',
+							'Type'  => 'int(10) unsigned',
+							'Key'   => 'PRI',
+						),
+						array(
+							'Field' => 'name',
+							'Type'  => 'varchar(50)',
+							'Key'   => '',
+						),
+						array(
+							'Field' => 'data',
+							'Type'  => 'longblob',
+							'Key'   => '',
+						),
+						array(
+							'Field' => 'note',
+							'Type'  => 'decimal(10,2)',
+							'Key'   => '',
+						),
+					),
+					'rows'    => $rows,
+				),
+			)
+		);
+
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), array(), 1000 );
+		$this->assertTrue( $dumper->dump( $this->noLimit() ) );
+
+		$sql = file_get_contents( $this->sqlFile() );
+		$this->assertSame( 3, preg_match_all( '/^INSERT INTO `wp_big` \(`id`, `name`, `data`, `note`\) VALUES$/m', $sql ) );
+		$this->assertSame( 2500, $dumper->state()['rows'] );
+
+		// Quote, binary and NULL handling (a decimal-typed value that is not a plain number is quoted).
+		$this->assertStringContainsString( "(1, 'O\\'Reilly', 0x00ff, 'a\\\\b'),\n", $sql );
+		$this->assertStringContainsString( "(2, 'line\\nbreak', '', 'cr\\r \\\"q\\\" nul\\0 sub\\Z'),\n", $sql );
+		$this->assertStringContainsString( "(3, '寿司 🍣', NULL, NULL),\n", $sql );
+		// A numeric column holding a number is emitted verbatim, binary 'x' as hex.
+		$this->assertStringContainsString( "(4, 'n4', 0x78, 1.5e3),\n", $sql );
+
+		// Statements end with ";" exactly at batch boundaries.
+		$this->assertStringContainsString( "(1000, 'n1000', 0x78, 1.5e3);\nINSERT INTO", $sql );
+		$this->assertStringContainsString( "(2000, 'n2000', 0x78, 1.5e3);\nINSERT INTO", $sql );
+		$this->assertStringContainsString( "(2500, 'n2500', 0x78, 1.5e3);\nSET FOREIGN_KEY_CHECKS=1;", $sql );
+	}
+
+	public function test_table_without_primary_key_and_empty_table(): void {
+		$wpdb = new FakeWpdb(
+			array(
+				'wp_empty'  => $this->simpleTable( array() ),
+				'wp_nopk'   => array(
+					'create'  => 'CREATE TABLE `wp_nopk` (`v` text)',
+					'columns' => array(
+						array(
+							'Field' => 'v',
+							'Type'  => 'text',
+							'Key'   => '',
+						),
+					),
+					'rows'    => array( array( 'v' => 'x' ) ),
+				),
+				'wp_twopks' => array(
+					'create'  => 'CREATE TABLE `wp_twopks` (...)',
+					'columns' => array(
+						array(
+							'Field' => 'a',
+							'Type'  => 'int(11)',
+							'Key'   => 'PRI',
+						),
+						array(
+							'Field' => 'b',
+							'Type'  => 'int(11)',
+							'Key'   => 'PRI',
+						),
+					),
+					'rows'    => array(),
+				),
+			)
+		);
+
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile() );
+		$this->assertTrue( $dumper->dump( $this->noLimit() ) );
+
+		$selects = array_values(
+			array_filter(
+				$wpdb->queries,
+				static function ( $q ) {
+					return 0 === strpos( $q, 'SELECT' );
+				}
+			)
+		);
+		$this->assertSame(
+			array(
+				'SELECT * FROM `wp_empty` ORDER BY `id` LIMIT 1000 OFFSET 0',
+				'SELECT * FROM `wp_nopk` LIMIT 1000 OFFSET 0',
+				'SELECT * FROM `wp_twopks` ORDER BY `a`, `b` LIMIT 1000 OFFSET 0',
+			),
+			$selects
+		);
+
+		$sql = file_get_contents( $this->sqlFile() );
+		$this->assertStringContainsString( "DROP TABLE IF EXISTS `wp_empty`;\nCREATE TABLE `wp_things`", $sql );
+		$this->assertSame( 1, preg_match_all( '/^INSERT INTO/m', $sql ) );
+		$this->assertStringContainsString( "INSERT INTO `wp_nopk` (`v`) VALUES\n('x');\n", $sql );
+	}
+
+	public function test_transients_excluded_from_options(): void {
+		$wpdb = new FakeWpdb(
+			array(
+				'wp_options' => array(
+					'create'  => 'CREATE TABLE `wp_options` (...)',
+					'columns' => array(
+						array(
+							'Field' => 'option_id',
+							'Type'  => 'bigint(20)',
+							'Key'   => 'PRI',
+						),
+						array(
+							'Field' => 'option_name',
+							'Type'  => 'varchar(191)',
+							'Key'   => 'UNI',
+						),
+					),
+					'rows'    => array(
+						array(
+							'option_id'   => '1',
+							'option_name' => 'siteurl',
+						),
+						array(
+							'option_id'   => '2',
+							'option_name' => '_transient_foo',
+						),
+						array(
+							'option_id'   => '3',
+							'option_name' => '_site_transient_bar',
+						),
+						array(
+							'option_id'   => '4',
+							'option_name' => 'blogname',
+						),
+					),
+				),
+				'wp_things'  => $this->simpleTable( array() ),
+			)
+		);
+
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile() );
+		$this->assertTrue( $dumper->dump( $this->noLimit() ) );
+
+		$this->assertContains(
+			"SELECT * FROM `wp_options` WHERE option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%' ORDER BY `option_id` LIMIT 1000 OFFSET 0",
+			$wpdb->queries
+		);
+		// Other tables are not filtered.
+		$this->assertContains( 'SELECT * FROM `wp_things` ORDER BY `id` LIMIT 1000 OFFSET 0', $wpdb->queries );
+
+		$sql = file_get_contents( $this->sqlFile() );
+		$this->assertStringContainsString( "'siteurl'", $sql );
+		$this->assertStringContainsString( "'blogname'", $sql );
+		$this->assertStringNotContainsString( 'transient', $sql );
+	}
+
+	public function test_resume_by_table_and_offset(): void {
+		$rows = array();
+		for ( $i = 1; $i <= 7; $i++ ) {
+			$rows[] = array(
+				'id'   => (string) $i,
+				'name' => 'n' . $i,
+			);
+		}
+		$tables = array(
+			'wp_b' => $this->simpleTable( $rows ),
+			'wp_a' => $this->simpleTable( array_slice( $rows, 0, 3 ) ),
+		);
+
+		// Reference: one uninterrupted run.
+		$reference = new DbDumper( new FakeWpdb( $tables ), $this->dir . '/ref.sql', $this->gzFile(), array(), 3 );
+		$this->assertTrue( $reference->dump( $this->noLimit() ) );
+
+		// Interrupted after every page, resuming from a JSON round-tripped state each time.
+		$state = array();
+		$calls = 0;
+		do {
+			$dumper = new DbDumper( new FakeWpdb( $tables ), $this->sqlFile(), $this->gzFile(), $state, 3 );
+			$done   = $dumper->dump( $this->stopNow() );
+			$state  = json_decode( json_encode( $dumper->state() ), true );
+			++$calls;
+			$this->assertLessThan( 20, $calls );
+		} while ( ! $done );
+
+		$this->assertGreaterThan( 3, $calls );
+		$this->assertSame( file_get_contents( $this->dir . '/ref.sql' ), file_get_contents( $this->sqlFile() ) );
+		$this->assertSame( array( 'wp_a', 'wp_b' ), $state['tables'] );
+		$this->assertSame( 10, $state['rows'] );
+		$this->assertSame( 'compress', $state['phase'] );
+		$this->assertSame( 1, substr_count( file_get_contents( $this->sqlFile() ), 'SET NAMES' ) );
+	}
+
+	public function test_resume_continues_from_saved_offset(): void {
+		$rows = array();
+		for ( $i = 1; $i <= 5; $i++ ) {
+			$rows[] = array(
+				'id'   => (string) $i,
+				'name' => 'n' . $i,
+			);
+		}
+		$wpdb   = new FakeWpdb( array( 'wp_things' => $this->simpleTable( $rows ) ) );
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), array(), 2 );
+
+		$this->assertFalse( $dumper->dump( $this->stopNow() ) );
+		$state = $dumper->state();
+		$this->assertSame( 2, $state['offset'] );
+		$this->assertSame( 0, $state['table_index'] );
+		$this->assertSame( 'dump', $state['phase'] );
+
+		$wpdb2   = new FakeWpdb( array( 'wp_things' => $this->simpleTable( $rows ) ) );
+		$resumed = new DbDumper( $wpdb2, $this->sqlFile(), $this->gzFile(), $state, 2 );
+		$this->assertTrue( $resumed->dump( $this->noLimit() ) );
+
+		// The resumed run starts at the saved offset and does not re-read the table's metadata.
+		$this->assertSame( 'SELECT * FROM `wp_things` ORDER BY `id` LIMIT 2 OFFSET 2', $wpdb2->queries[0] );
+		$this->assertNotContains( 'SHOW CREATE TABLE `wp_things`', $wpdb2->queries );
+	}
+
+	public function test_compress_produces_valid_multi_member_gzip(): void {
+		// ~2.5 MiB of semi-random but reproducible text, so it needs several 1 MiB chunks.
+		$sql = '';
+		mt_srand( 42 );
+		while ( strlen( $sql ) < 2600000 ) {
+			$sql .= md5( (string) mt_rand() ) . "\n";
+		}
+		file_put_contents( $this->sqlFile(), $sql );
+
+		$state = array( 'phase' => 'compress' );
+		$runs  = 0;
+		do {
+			$dumper = new DbDumper( new FakeWpdb( array() ), $this->sqlFile(), $this->gzFile(), $state );
+			$done   = $dumper->compress( $this->stopNow() );
+			$state  = $dumper->state();
+			++$runs;
+			$this->assertLessThan( 10, $runs );
+		} while ( ! $done );
+
+		$this->assertGreaterThanOrEqual( 3, $runs );
+		$this->assertFileDoesNotExist( $this->sqlFile() );
+		$this->assertSame( 'done', $state['phase'] );
+
+		$handle = gzopen( $this->gzFile(), 'rb' );
+		$out    = '';
+		while ( ! gzeof( $handle ) ) {
+			$out .= gzread( $handle, 65536 );
+		}
+		gzclose( $handle );
+
+		$this->assertSame( strlen( $sql ), strlen( $out ) );
+		$this->assertTrue( $sql === $out );
+	}
+}
