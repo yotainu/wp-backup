@@ -51,6 +51,7 @@ use WpPcloudBackup\Zip\ZipWriter;
  *   parts              array    PartWriter::state().
  *   return_to          string   Step to continue with once no part is pending ('zip' | 'finalize').
  *   warnings           string[] Warnings found after the scan (the scan's own are in scanner.warnings).
+ *   backup_root, excludes, part_size  Job inputs copied from the settings by prepare; read from here afterwards.
  *   db_sha1, db_sha256, db_size  Hashes and size of database.sql.gz.
  *   db_uploaded, manifest_uploaded, renamed  bool  Idempotent finalize sub-steps.
  *   finished_at        int      Completion time used by the report.
@@ -722,6 +723,7 @@ final class JobRunner {
 	// ------------------------------------------------------------------
 
 	private function stepPrepare(): bool {
+		$this->snapshotInputs();
 		$base = $this->siteFolderPath();
 
 		$siteId       = $this->storage->ensureFolder( $base );
@@ -836,7 +838,7 @@ final class JobRunner {
 	 * Add listed files to the archive; hand over to upload as soon as a part is complete.
 	 */
 	private function stepZip( callable $timeUp ): bool {
-		$sink = new PartWriter( $this->workDir->path(), self::PARTS_BASE, $this->settings->partSizeBytes(), (array) $this->state->get( 'parts', array() ) );
+		$sink = $this->partWriter();
 		$zip  = new ZipWriter( $sink, $this->file( self::CENTRAL_FILE ), (array) $this->state->get( 'zip', array() ) );
 
 		// The previous run died (or failed) in the middle of an entry.
@@ -957,7 +959,7 @@ final class JobRunner {
 	 * for the next part while the budget allows.
 	 */
 	private function stepUpload(): bool {
-		$sink    = new PartWriter( $this->workDir->path(), self::PARTS_BASE, $this->settings->partSizeBytes(), (array) $this->state->get( 'parts', array() ) );
+		$sink    = $this->partWriter();
 		$pending = $sink->pendingUploads();
 
 		if ( array() !== $pending ) {
@@ -1050,7 +1052,7 @@ final class JobRunner {
 	 * @throws \RuntimeException When a part is still pending or unfinished (retried by the failure policy).
 	 */
 	private function assertAllPartsUploaded(): void {
-		$sink  = new PartWriter( $this->workDir->path(), self::PARTS_BASE, $this->settings->partSizeBytes(), (array) $this->state->get( 'parts', array() ) );
+		$sink  = $this->partWriter();
 		$parts = $sink->completedParts();
 
 		if ( array() === $parts || array() !== $sink->pendingUploads() || 0 !== (int) $sink->state()['current_size'] ) {
@@ -1203,7 +1205,7 @@ final class JobRunner {
 			'home_url'       => $this->envValue( 'home_url' ),
 			'wp_version'     => $this->envValue( 'wp_version' ),
 			'php_version'    => PHP_VERSION,
-			'backup_root'    => (string) $this->settings->get( 'backup_root' ),
+			'backup_root'    => $this->backupRoot(),
 			'abspath'        => $this->envValue( 'abspath' ),
 			'files_count'    => (int) ( ( (array) $this->state->get( 'zip', array() ) )['entries'] ?? 0 ),
 			'files_bytes'    => (int) $this->state->get( 'zip_bytes', 0 ),
@@ -1225,7 +1227,7 @@ final class JobRunner {
 				'sha256' => (string) $this->state->get( 'db_sha256', '' ),
 			),
 			'warnings'       => $this->allWarnings(),
-			'excludes'       => (array) $this->settings->get( 'excludes' ),
+			'excludes'       => $this->configuredExcludes(),
 		);
 	}
 
@@ -1346,8 +1348,48 @@ final class JobRunner {
 		return FileScanner::LARGE_FILE_BYTES;
 	}
 
+	/**
+	 * Job inputs are read from the state once prepare has stored them, so a settings change
+	 * during a job cannot mix two configurations in one generation. The settings are the
+	 * fallback for a state saved before the snapshot existed.
+	 */
+	private function snapshotInputs(): void {
+		if ( null !== $this->state->get( 'backup_root' ) ) {
+			return;
+		}
+
+		$this->state->merge(
+			array(
+				'backup_root' => rtrim( (string) $this->settings->get( 'backup_root' ), '/\\' ),
+				'excludes'    => array_values( (array) $this->settings->get( 'excludes' ) ),
+				'part_size'   => $this->settings->partSizeBytes(),
+			)
+		);
+	}
+
 	private function backupRoot(): string {
-		return rtrim( (string) $this->settings->get( 'backup_root' ), '/\\' );
+		$root = $this->state->get( 'backup_root' );
+
+		return rtrim( (string) ( null === $root ? $this->settings->get( 'backup_root' ) : $root ), '/\\' );
+	}
+
+	/**
+	 * @return string[]
+	 */
+	private function configuredExcludes(): array {
+		$excludes = $this->state->get( 'excludes' );
+
+		return array_values( (array) ( null === $excludes ? $this->settings->get( 'excludes' ) : $excludes ) );
+	}
+
+	private function partSize(): int {
+		$size = (int) $this->state->get( 'part_size', 0 );
+
+		return $size > 0 ? $size : $this->settings->partSizeBytes();
+	}
+
+	private function partWriter(): PartWriter {
+		return new PartWriter( $this->workDir->path(), self::PARTS_BASE, $this->partSize(), (array) $this->state->get( 'parts', array() ) );
 	}
 
 	/**
@@ -1357,7 +1399,7 @@ final class JobRunner {
 	 * @return string[]
 	 */
 	private function excludes(): array {
-		$excludes = array_values( (array) $this->settings->get( 'excludes' ) );
+		$excludes = $this->configuredExcludes();
 		$root     = $this->backupRoot() . '/';
 
 		foreach ( array( $this->workDir->path(), $this->envValue( 'storage_dir' ) ) as $dir ) {

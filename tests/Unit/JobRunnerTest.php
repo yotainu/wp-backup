@@ -182,7 +182,7 @@ final class JobRunnerTest extends TestCase {
 			}
 
 			public function partSizeBytes(): int {
-				return 524288;
+				return (int) ( $this->values['part_size_bytes'] ?? 524288 );
 			}
 		};
 		$this->workDir  = new WorkDir( $this->settings, $this->base . '/uploads' );
@@ -1328,5 +1328,33 @@ final class JobRunnerTest extends TestCase {
 		$runner->recordError( 'escaped' );
 
 		$this->assertSame( 'escaped', $this->readState()['last_error'] );
+	}
+	public function test_settings_changed_during_a_job_do_not_affect_it(): void {
+		$other = $this->base . '/other-site';
+		mkdir( $other );
+		file_put_contents( $other . '/intruder.txt', 'not part of this job' );
+
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+		$runner->run();
+		$this->assertSame( 'scan', $this->readState()['step'], 'prepare is done, the scan has begun' );
+		$this->assertSame( $this->site, $this->readState()['backup_root'] );
+		$this->assertSame( array( 'cache' ), $this->readState()['excludes'] );
+		$this->assertSame( self::PART_SIZE, $this->readState()['part_size'] );
+
+		$this->values['backup_root']     = $other;
+		$this->values['excludes']        = array( 'dir00', 'wp-content' );
+		$this->values['part_size_bytes'] = 100000;
+
+		$this->runToEnd( $runner );
+
+		$generation = $this->onlyGeneration();
+		$this->assertArchiveMatches( $generation, $this->files );
+		$sizes = array_map( 'filesize', glob( $generation . '/files.zip.*' ) );
+		$this->assertSame( self::PART_SIZE, $sizes[0], 'parts keep the size the job started with' );
+
+		$manifest = json_decode( (string) file_get_contents( $generation . '/manifest.json' ), true );
+		$this->assertSame( $this->site, $manifest['backup_root'] );
+		$this->assertSame( array( 'cache' ), $manifest['excludes'] );
 	}
 }
