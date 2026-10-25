@@ -108,6 +108,19 @@ final class Plugin {
 	 * Activation hook: persist settings, make sure the cron key exists, create the work dir and schedule the tick.
 	 */
 	public static function activate(): void {
+		$missing = self::missingRequirements();
+		if ( array() !== $missing ) {
+			deactivate_plugins( plugin_basename( WP_PCLOUD_BACKUP_FILE ) );
+			wp_die(
+				esc_html(
+					'WP pCloud Backup を有効化できません。次の要件を満たしていません: ' . implode( '、', $missing )
+					. '。サーバーの PHP 設定（または契約プラン）を確認してください。'
+				),
+				'',
+				array( 'back_link' => true )
+			);
+		}
+
 		$settings = new Settings();
 		$settings->update( array() );
 
@@ -122,6 +135,30 @@ final class Plugin {
 
 		self::workDirFor( $settings )->ensure();
 		Scheduler::registerCron();
+	}
+
+	/**
+	 * Environment requirements that are not met.
+	 *
+	 * @param callable|null $extensionLoaded Seam for extension_loaded(); receives the extension name.
+	 * @param int           $phpVersionId    PHP_VERSION_ID of the running interpreter.
+	 * @return string[] Human readable names: "PHP 7.4" and/or missing extension names. Empty when all is fine.
+	 */
+	public static function missingRequirements( ?callable $extensionLoaded = null, int $phpVersionId = PHP_VERSION_ID ): array {
+		$extensionLoaded = $extensionLoaded ?? 'extension_loaded';
+		$missing         = array();
+
+		if ( $phpVersionId < 70400 ) {
+			$missing[] = 'PHP 7.4';
+		}
+
+		foreach ( array( 'zlib', 'curl', 'openssl' ) as $extension ) {
+			if ( ! $extensionLoaded( $extension ) ) {
+				$missing[] = $extension;
+			}
+		}
+
+		return $missing;
 	}
 
 	/**

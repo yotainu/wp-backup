@@ -31,4 +31,34 @@ final class PluginTest extends TestCase {
 		$this->assertNull( Plugin::buildStorage( '', null ) );
 		$this->assertNull( Plugin::buildStorage( null, '' ) );
 	}
+
+	public function test_requirements_met_returns_empty_list(): void {
+		$loaded = static function ( string $extension ): bool {
+			return true;
+		};
+
+		$this->assertSame( array(), Plugin::missingRequirements( $loaded, 70400 ) );
+		$this->assertSame( array(), Plugin::missingRequirements( $loaded, 80300 ) );
+	}
+
+	public function test_missing_extensions_are_named(): void {
+		$loaded = static function ( string $extension ): bool {
+			return 'curl' === $extension;
+		};
+
+		$this->assertSame( array( 'zlib', 'openssl' ), Plugin::missingRequirements( $loaded, 80200 ) );
+	}
+
+	public function test_old_php_is_reported_first(): void {
+		$loaded = static function ( string $extension ): bool {
+			return 'zlib' !== $extension;
+		};
+
+		$this->assertSame( array( 'PHP 7.4', 'zlib' ), Plugin::missingRequirements( $loaded, 70319 ) );
+	}
+
+	public function test_default_arguments_use_the_running_environment(): void {
+		// The test environment (PHP >= 7.4 with zlib, curl and openssl) must satisfy the requirements.
+		$this->assertSame( array(), Plugin::missingRequirements() );
+	}
 }
