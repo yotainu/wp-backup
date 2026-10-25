@@ -1403,6 +1403,16 @@ final class JobRunnerTest extends TestCase {
 		$runner->recordError( 'escaped' );
 
 		$this->assertSame( 'escaped', $this->readState()['last_error'] );
+
+		// Another run holds the lock: its state is left alone.
+		$other = JobState::load( $this->stateFile() );
+		$this->assertTrue( $other->acquireLock( $this->workDir->path( 'runner.lock' ) ) );
+		$runner->recordError( 'while locked' );
+		$this->assertSame( 'escaped', $this->readState()['last_error'] );
+		$other->releaseLock();
+
+		$runner->recordError( 'after the run' );
+		$this->assertSame( 'after the run', $this->readState()['last_error'] );
 	}
 	public function test_settings_changed_during_a_job_do_not_affect_it(): void {
 		$other = $this->base . '/other-site';

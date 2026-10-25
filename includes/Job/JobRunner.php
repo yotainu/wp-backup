@@ -550,17 +550,27 @@ final class JobRunner {
 
 	/**
 	 * Store a message as last_error of the current job, if there is one (used by Trigger for
-	 * exceptions that escaped a run). Best effort: never throws.
+	 * exceptions that escaped a run). Best effort: never throws. Skipped while another run
+	 * holds the lock, so its progress is never overwritten with an older state.
 	 */
 	public function recordError( string $message ): void {
+		$lock = null;
 		try {
-			$state = $this->loadState();
+			$lock = $this->loadState();
+			if ( null === $lock || ! $lock->acquireLock( $this->file( self::LOCK_FILE ) ) ) {
+				return;
+			}
+			$state = $this->loadState(); // Re-read under the lock.
 			if ( null !== $state ) {
 				$state->set( 'last_error', $message );
 				$state->save();
 			}
 		} catch ( \Throwable $e ) {
 			unset( $e );
+		} finally {
+			if ( null !== $lock ) {
+				$lock->releaseLock();
+			}
 		}
 	}
 
