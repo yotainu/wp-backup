@@ -35,7 +35,9 @@ use WpPcloudBackup\Zip\ZipWriter;
  *   last_error         string|null Message of the last failure.
  *   last_run_started   int      Start of the last run (epoch).
  *   last_run_finished  int      End of the last run (epoch); older than last_run_started = the run died
- *                               (counted as a failed attempt of the current step by the next run).
+ *                               (counted as a failed attempt of the current step by the next run,
+ *                               unless the job made progress during that run).
+ *   run_start_progress array    progressFingerprint() at the start of the last run.
  *   in_progress_file   string|null Relative path the zip step is adding (saved before addFile).
  *   last_fatal         array|null  {type, message, file} of a fatal error recorded by the shutdown handler.
  *   site_folder_id     int      Remote root_folder/site_folder.
@@ -353,7 +355,12 @@ final class JobRunner {
 				return $this->status();
 			}
 
-			$this->state->set( 'last_run_started', $now );
+			$this->state->merge(
+				array(
+					'last_run_started'   => $now,
+					'run_start_progress' => $this->progressFingerprint(),
+				)
+			);
 			$this->state->save();
 			$tracked = true;
 			$this->watchForFatalErrors();
@@ -571,6 +578,10 @@ final class JobRunner {
 	/**
 	 * Count the previous, unfinished run as a failed attempt of the current step.
 	 *
+	 * A run that died after saving progress proves the job is not stuck: the attempts of the
+	 * step are reset and the message is kept only as a note. Only consecutive deaths without
+	 * progress reach MAX_ATTEMPTS. A state without a start fingerprint counts the death.
+	 *
 	 * @return bool True when the job was aborted (MAX_ATTEMPTS reached).
 	 */
 	private function countUnfinishedRun(): bool {
@@ -578,8 +589,10 @@ final class JobRunner {
 		$file     = $this->state->get( 'in_progress_file' );
 		$fatal    = $this->state->get( 'last_fatal' );
 		$attempts = (array) $this->state->get( 'attempts', array() );
+		$before   = $this->state->get( 'run_start_progress' );
+		$progress = is_array( $before ) && self::normalized( $before ) !== self::normalized( $this->progressFingerprint() );
 
-		$attempts[ $step ] = (int) ( $attempts[ $step ] ?? 0 ) + 1;
+		$attempts[ $step ] = $progress ? 0 : (int) ( $attempts[ $step ] ?? 0 ) + 1;
 
 		$message = sprintf(
 			/* translators: %s: file or step that was being processed. */
@@ -606,6 +619,49 @@ final class JobRunner {
 		}
 
 		return false;
+	}
+
+	/**
+	 * Everything a run can advance and save. Two equal fingerprints mean no progress in between.
+	 * in_progress_file is left out: it is saved before a file is added, not after.
+	 */
+	private function progressFingerprint(): array {
+		$db       = (array) $this->state->get( 'db', array() );
+		$uploaded = 0;
+		foreach ( (array) ( $this->state->get( 'parts', array() )['parts'] ?? array() ) as $part ) {
+			if ( ! empty( $part['uploaded'] ) ) {
+				++$uploaded;
+			}
+		}
+
+		$fingerprint = array(
+			'step'       => (string) $this->state->get( 'step', 'prepare' ),
+			'scan_lines' => (int) $this->state->get( 'scan_lines', 0 ),
+			'db'         => array(
+				$db['table_index'] ?? 0,
+				$db['offset'] ?? 0,
+				$db['last_key'] ?? null,
+				$db['phase'] ?? null,
+				$db['compress_offset'] ?? 0,
+			),
+			'zip_line'   => (int) $this->state->get( 'zip_line', 0 ),
+			'uploaded'   => $uploaded,
+		);
+		foreach ( array( 'db_uploaded', 'manifest_uploaded', 'renamed', 'pruned', 'history_added', 'last_success_saved', 'notified', 'reported' ) as $flag ) {
+			$fingerprint[ $flag ] = (bool) $this->state->get( $flag );
+		}
+
+		return $fingerprint;
+	}
+
+	/**
+	 * The value as it reads back from state.json, so in-memory and loaded values compare equal.
+	 *
+	 * @param mixed $value Any JSON-serialisable value.
+	 * @return mixed
+	 */
+	private static function normalized( $value ) {
+		return json_decode( (string) json_encode( $value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ), true );
 	}
 
 	/**

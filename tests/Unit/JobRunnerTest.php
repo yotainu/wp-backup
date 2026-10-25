@@ -1276,6 +1276,71 @@ final class JobRunnerTest extends TestCase {
 		$this->assertSame( 'success', ( new History() )->all()[0]['result'] );
 	}
 
+	public function test_deaths_after_progress_reset_the_attempts_and_five_stuck_deaths_abort(): void {
+		$snapshot = $this->base . '/state-at-death.json';
+		$mode     = 'progress';
+		$runStart = 0;
+		$entries  = array();
+		$seen     = array();
+		$clock    = function () use ( $snapshot, &$mode, &$runStart, &$entries, &$seen ): int {
+			$time = $this->now;
+
+			if ( ! is_file( $snapshot ) && is_file( $this->stateFile() ) ) {
+				$state = $this->readState();
+				// Only saves of this run (its start is saved first, together with the death accounting).
+				if ( 'zip' === $state['step'] && null !== ( $state['in_progress_file'] ?? null ) && $runStart === (int) $state['last_run_started'] ) {
+					$entries[ $state['zip_line'] . '|' . $state['in_progress_file'] ] = true;
+					// "progress": die inside the second file of the run, after the first one was saved.
+					// "stuck": die inside the first file, before anything new was saved.
+					if ( count( $entries ) >= ( 'progress' === $mode ? 2 : 1 ) ) {
+						copy( $this->stateFile(), $snapshot );
+						$seen[]     = array( $mode, (int) ( $state['attempts']['zip'] ?? 0 ), $state['last_error'] ?? null );
+						$this->now += 100; // Past the deadline: the rest of the run is discarded by dieAt().
+					}
+				}
+			}
+
+			return $time;
+		};
+		$this->tick = 0;
+		$runner     = $this->runner( null, null, $clock );
+		$runner->startJob( 'manual' );
+
+		$cycle = function () use ( $runner, $snapshot, &$runStart, &$entries ): void {
+			$runStart = $this->now;
+			$entries  = array();
+			$runner->run();
+			$this->dieAt( $snapshot );
+		};
+
+		// Alternating: every run completes a file, then dies. The job is never stuck.
+		for ( $i = 0; $i < 7; $i++ ) {
+			$cycle();
+		}
+		$notes = 0;
+		foreach ( array_slice( $seen, 1 ) as $i => $entry ) {
+			$this->assertSame( 0, $entry[1], "progress death $i resets the attempts" );
+			// A zip -> upload -> zip switch inside the run clears last_error again, so not every snapshot has it.
+			$notes += false !== strpos( (string) $entry[2], '前回の実行が途中で終了しました' ) ? 1 : 0;
+		}
+		$this->assertGreaterThan( 0, $notes, 'the death is kept as a note' );
+
+		// Five consecutive deaths inside the same file, with no progress in between.
+		$mode = 'stuck';
+		for ( $i = 0; $i < 5; $i++ ) {
+			$cycle();
+		}
+		$this->assertSame( array( 0, 1, 2, 3, 4 ), array_column( array_slice( $seen, 7 ), 1 ) );
+		$this->assertSame( array(), $this->mails );
+
+		$status = $runner->run();
+
+		$this->assertFalse( $status['running'] );
+		$this->assertCount( 1, $this->mails );
+		$this->assertStringContainsString( '試行回数: 5', $this->mails[0][2] );
+		$this->assertSame( 'failed', ( new History() )->all()[0]['result'] );
+	}
+
 	public function test_fatal_error_is_recorded_without_paths_and_reported_by_the_next_run(): void {
 		$seen    = array();
 		$storage = $this->decoratedStorage(
