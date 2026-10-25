@@ -32,6 +32,37 @@ final class PluginTest extends TestCase {
 		$this->assertNull( Plugin::buildStorage( null, '' ) );
 	}
 
+	public function test_dev_storage_dir_from_treats_undefined_and_empty_as_pcloud(): void {
+		$this->assertNull( Plugin::devStorageDirFrom( null ) );
+		$this->assertNull( Plugin::devStorageDirFrom( '' ) );
+		$this->assertNull( Plugin::devStorageDirFrom( '   ' ) );
+		$this->assertNull( Plugin::devStorageDirFrom( array( '/x' ) ) );
+		$this->assertSame( '/var/www/html/wp-content/wppb-remote', Plugin::devStorageDirFrom( '/var/www/html/wp-content/wppb-remote' ) );
+	}
+
+	public function test_dev_storage_dir_is_null_when_the_constant_is_undefined(): void {
+		$this->assertFalse( defined( 'WP_PCLOUD_BACKUP_STORAGE_DIR' ) );
+		$this->assertNull( Plugin::devStorageDir() );
+	}
+
+	/**
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_dev_storage_dir_is_null_when_the_constant_is_empty(): void {
+		define( 'WP_PCLOUD_BACKUP_STORAGE_DIR', '' );
+		$this->assertNull( Plugin::devStorageDir() );
+	}
+
+	/**
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_dev_storage_dir_returns_the_constant(): void {
+		define( 'WP_PCLOUD_BACKUP_STORAGE_DIR', '/srv/remote' );
+		$this->assertSame( '/srv/remote', Plugin::devStorageDir() );
+	}
+
 	public function test_requirements_met_returns_empty_list(): void {
 		$loaded = static function ( string $extension ): bool {
 			return true;

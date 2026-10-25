@@ -172,7 +172,7 @@ final class Plugin {
 	 * Storage selection. A local directory (development/test mode) wins over a token.
 	 *
 	 * @param string|null $token    pCloud access token.
-	 * @param string|null $localDir WP_PCLOUD_BACKUP_STORAGE_DIR value, if defined.
+	 * @param string|null $localDir Development-mode directory (see devStorageDir()), or null.
 	 * @param string      $apiHost  pCloud API host.
 	 * @return StorageInterface|null Null when not connected.
 	 */
@@ -188,6 +188,27 @@ final class Plugin {
 		return null;
 	}
 
+	/**
+	 * Development-mode storage directory (WP_PCLOUD_BACKUP_STORAGE_DIR), or null for pCloud.
+	 *
+	 * The single rule for every caller: an undefined or empty constant means pCloud. wp-env
+	 * overrides cannot remove a constant, so an empty string is how development mode is turned off.
+	 */
+	public static function devStorageDir(): ?string {
+		return self::devStorageDirFrom( defined( 'WP_PCLOUD_BACKUP_STORAGE_DIR' ) ? constant( 'WP_PCLOUD_BACKUP_STORAGE_DIR' ) : null );
+	}
+
+	/**
+	 * @param mixed $value Raw constant value, or null when undefined.
+	 */
+	public static function devStorageDirFrom( $value ): ?string {
+		if ( ! is_scalar( $value ) || '' === trim( (string) $value ) ) {
+			return null;
+		}
+
+		return (string) $value;
+	}
+
 	public function settings(): Settings {
 		if ( null === $this->settings ) {
 			$this->settings = new Settings();
@@ -200,7 +221,7 @@ final class Plugin {
 		if ( ! $this->storageBuilt ) {
 			$this->storage = self::buildStorage(
 				$this->settings()->accessToken(),
-				defined( 'WP_PCLOUD_BACKUP_STORAGE_DIR' ) ? (string) WP_PCLOUD_BACKUP_STORAGE_DIR : null,
+				self::devStorageDir(),
 				defined( 'WP_PCLOUD_BACKUP_API_HOST' ) ? (string) WP_PCLOUD_BACKUP_API_HOST : 'api.pcloud.com'
 			);
 			$this->storageBuilt = true;

@@ -1262,7 +1262,7 @@ final class JobRunner {
 			case 'abspath':
 				return defined( 'ABSPATH' ) ? (string) ABSPATH : '';
 			case 'storage_dir':
-				return defined( 'WP_PCLOUD_BACKUP_STORAGE_DIR' ) ? (string) constant( 'WP_PCLOUD_BACKUP_STORAGE_DIR' ) : '';
+				return (string) \WpPcloudBackup\Plugin::devStorageDir();
 		}
 
 		return '';
