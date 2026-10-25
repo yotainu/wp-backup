@@ -8,7 +8,7 @@ namespace WpPcloudBackup;
  * All values live in one option array. A value defined as a constant in
  * wp-config.php wins over the stored one and cannot be changed from the UI.
  */
-final class Settings {
+class Settings {
 
 	public const OPTION = 'wp_pcloud_backup_settings';
 
@@ -132,16 +132,16 @@ final class Settings {
 	 */
 	public function update( array $input ): array {
 		$defaults = $this->defaults();
-		$stored   = $this->stored();
+		$changes  = array();
 
 		foreach ( $input as $key => $value ) {
 			if ( ! in_array( $key, self::KEYS, true ) || 'access_token_enc' === $key || $this->isLocked( $key ) ) {
 				continue;
 			}
-			$stored[ $key ] = $this->sanitizeValue( $key, $value, $defaults[ $key ] );
+			$changes[ $key ] = $this->sanitizeValue( $key, $value, $defaults[ $key ] );
 		}
 
-		$this->save( $stored );
+		$this->save( $changes );
 
 		return $this->all();
 	}
@@ -158,15 +158,13 @@ final class Settings {
 			return (string) constant( self::CONSTANTS['access_token'] );
 		}
 
-		// Task 3: decrypt access_token_enc.
-		return null;
+		$blob = $this->stored()['access_token_enc'] ?? '';
+
+		return is_string( $blob ) && '' !== $blob ? Crypto::decrypt( $blob ) : null;
 	}
 
 	public function setAccessToken( ?string $plain ): void {
-		$stored = $this->stored();
-		// Task 3: encrypt.
-		$stored['access_token_enc'] = null === $plain ? '' : $plain;
-		$this->save( $stored );
+		$this->save( array( 'access_token_enc' => null === $plain || '' === $plain ? '' : Crypto::encrypt( $plain ) ) );
 	}
 
 	public function partSizeBytes(): int {
@@ -182,9 +180,14 @@ final class Settings {
 		return $this->stored;
 	}
 
-	private function save( array $stored ): void {
-		$this->stored = $stored;
-		update_option( self::OPTION, $stored, true );
+	/**
+	 * Write only the given keys on top of a fresh read of the option, so a cron
+	 * process and an admin save in different requests do not overwrite each other.
+	 */
+	private function save( array $changes ): void {
+		$option       = get_option( self::OPTION, array() );
+		$this->stored = array_merge( is_array( $option ) ? $option : array(), $changes );
+		update_option( self::OPTION, $this->stored, true );
 	}
 
 	/**
@@ -244,13 +247,17 @@ final class Settings {
 		$path = '/' . ltrim( $path, '/' );
 		$path = rtrim( $path, '/' );
 
-		return '' === $path ? $default : $path;
+		if ( '' === $path || array_intersect( explode( '/', $path ), array( '.', '..' ) ) ) {
+			return $default;
+		}
+
+		return $path;
 	}
 
 	private function sanitizeSiteFolder( string $value, string $default ): string {
 		$name = preg_replace( '/[^A-Za-z0-9._-]/', '_', trim( $value ) );
 
-		return '' === $name ? $default : $name;
+		return '' === $name || '.' === $name || '..' === $name ? $default : $name;
 	}
 
 	/**

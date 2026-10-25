@@ -5,6 +5,7 @@ namespace WpPcloudBackup\Tests\Unit;
 use Brain\Monkey;
 use Brain\Monkey\Functions;
 use PHPUnit\Framework\TestCase;
+use WpPcloudBackup\Crypto;
 use WpPcloudBackup\Settings;
 
 final class SettingsTest extends TestCase {
@@ -26,6 +27,13 @@ final class SettingsTest extends TestCase {
 	protected function setUp(): void {
 		parent::setUp();
 		Monkey\setUp();
+
+		if ( ! defined( 'AUTH_KEY' ) ) {
+			define( 'AUTH_KEY', 'test-auth-key' );
+		}
+		if ( ! defined( 'SECURE_AUTH_KEY' ) ) {
+			define( 'SECURE_AUTH_KEY', 'test-secure-auth-key' );
+		}
 
 		$this->options = array( 'admin_email' => 'admin@example.com' );
 		$this->updates = array();
@@ -166,17 +174,62 @@ final class SettingsTest extends TestCase {
 		$this->assertSame( 50 * 1048576, $settings->partSizeBytes() );
 	}
 
-	public function test_set_access_token_stores_value_and_clears_with_null(): void {
+	public function test_set_access_token_stores_encrypted_value_and_clears_with_null(): void {
 		$settings = new Settings();
 		$settings->setAccessToken( 'tok' );
-		$this->assertSame( 'tok', $this->options[ Settings::OPTION ]['access_token_enc'] );
+
+		$blob = $this->options[ Settings::OPTION ]['access_token_enc'];
+		$this->assertNotSame( 'tok', $blob );
+		$this->assertSame( 'tok', Crypto::decrypt( $blob ) );
+		$this->assertSame( 'tok', $settings->accessToken() );
+		$this->assertSame( 'tok', ( new Settings() )->accessToken() );
 
 		$settings->setAccessToken( null );
 		$this->assertSame( '', $this->options[ Settings::OPTION ]['access_token_enc'] );
+		$this->assertNull( $settings->accessToken() );
 	}
 
-	public function test_access_token_is_null_without_constant(): void {
+	public function test_access_token_is_null_without_constant_or_stored_token(): void {
 		$this->assertNull( ( new Settings() )->accessToken() );
+	}
+
+	public function test_access_token_is_null_when_decryption_fails(): void {
+		$this->options[ Settings::OPTION ] = array( 'access_token_enc' => 'garbage' );
+
+		$this->assertNull( ( new Settings() )->accessToken() );
+	}
+
+	public function test_save_merges_keys_changed_by_other_processes(): void {
+		$this->options[ Settings::OPTION ] = array( 'keep' => 2 );
+		$settings                          = new Settings();
+		$settings->get( 'keep' ); // This instance has read the option and never saw last_success.
+
+		$this->options[ Settings::OPTION ] = array( 'keep' => 2, 'last_success' => 123 );
+		$settings->update( array( 'keep' => 5 ) );
+
+		$this->assertSame( array( 'keep' => 5, 'last_success' => 123 ), $this->options[ Settings::OPTION ] );
+	}
+
+	public function test_save_does_not_resurrect_stale_values_of_untouched_keys(): void {
+		$this->options[ Settings::OPTION ] = array( 'keep' => 2, 'schedule' => 'daily' );
+		$settings                          = new Settings();
+		$settings->get( 'keep' );
+
+		$this->options[ Settings::OPTION ] = array( 'keep' => 2, 'schedule' => 'monthly' );
+		$settings->update( array( 'keep' => 5 ) );
+
+		$this->assertSame( 'monthly', $this->options[ Settings::OPTION ]['schedule'] );
+		$this->assertSame( 'monthly', $settings->get( 'schedule' ) );
+	}
+
+	public function test_dot_segments_in_folders_fall_back_to_default(): void {
+		$settings = new Settings();
+
+		$this->assertSame( 'example.com', $settings->update( array( 'site_folder' => '..' ) )['site_folder'] );
+		$this->assertSame( 'example.com', $settings->update( array( 'site_folder' => '.' ) )['site_folder'] );
+		$this->assertSame( '/WPBackup', $settings->update( array( 'root_folder' => '/WPBackup/../x' ) )['root_folder'] );
+		$this->assertSame( '/WPBackup', $settings->update( array( 'root_folder' => './x' ) )['root_folder'] );
+		$this->assertSame( '/a/b..c', $settings->update( array( 'root_folder' => 'a/b..c' ) )['root_folder'] );
 	}
 
 	/**
