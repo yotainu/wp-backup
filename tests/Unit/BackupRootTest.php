@@ -62,4 +62,32 @@ final class BackupRootTest extends TestCase {
 		$this->assertFalse( BackupRoot::validate( '/var/www/html2', '/var/www', '/var/www/html' ) );
 		$this->assertFalse( BackupRoot::validate( '/var/www/../..', '/var/www', '/var/www/html' ) );
 	}
+	public function test_stays_at_abspath_when_the_folder_does_not_match_the_url(): void {
+		// site_url .../wp but WordPress lives in .../wordpress (rewrite or alias): do not guess.
+		$this->assertSame(
+			'/var/www/html/wordpress',
+			BackupRoot::detect( '/var/www/html/wordpress/', 'https://ex.jp/wp', 'https://ex.jp' )
+		);
+		// Only the last of two segments matches: still no guess.
+		$this->assertSame(
+			'/var/www/html/x/b',
+			BackupRoot::detect( '/var/www/html/x/b/', 'https://ex.jp/a/b', 'https://ex.jp' )
+		);
+		// More URL segments than folders.
+		$this->assertSame(
+			'/wp',
+			BackupRoot::detect( '/wp/', 'https://ex.jp/a/wp', 'https://ex.jp' )
+		);
+	}
+
+	public function test_matches_percent_encoded_segments(): void {
+		$this->assertSame(
+			'/var/www/html',
+			BackupRoot::detect( '/var/www/html/my wp/', 'https://ex.jp/my%20wp', 'https://ex.jp' )
+		);
+	}
+
+	public function test_climbs_to_the_filesystem_root(): void {
+		$this->assertSame( '/', BackupRoot::detect( '/wp/', 'https://ex.jp/wp', 'https://ex.jp' ) );
+	}
 }

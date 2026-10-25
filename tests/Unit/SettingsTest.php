@@ -154,7 +154,8 @@ final class SettingsTest extends TestCase {
 	}
 
 	public function test_default_backup_root_goes_up_when_wordpress_is_in_subdir(): void {
-		Functions\when( 'site_url' )->justReturn( 'https://example.com/blog/wp' );
+		// WordPress in a subfolder named like ABSPATH's last folder (BackupRoot only climbs on a match).
+		Functions\when( 'site_url' )->justReturn( 'https://example.com/blog/' . basename( rtrim( ABSPATH, '/' ) ) );
 
 		$expected = dirname( rtrim( ABSPATH, '/' ) );
 

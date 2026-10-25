@@ -624,7 +624,8 @@ final class AdminPageTest extends TestCase {
 
 	public function test_detect_root_restores_the_detected_folder(): void {
 		$settings = new ArrayBackedSettings( array( 'backup_root' => '/custom' ) );
-		Functions\when( 'site_url' )->justReturn( 'https://example.com/wp' );
+		// WordPress in a subfolder named like ABSPATH's last folder (BackupRoot only climbs on a match).
+		Functions\when( 'site_url' )->justReturn( 'https://example.com/' . basename( rtrim( ABSPATH, '/' ) ) );
 		Functions\when( 'home_url' )->justReturn( 'https://example.com' );
 
 		$this->page( $this->plugin( $settings ) )->handleDetectRoot();

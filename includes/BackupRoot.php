@@ -13,6 +13,10 @@ final class BackupRoot {
 
 	/**
 	 * Absolute path (no trailing slash) of the folder the site is served from.
+	 *
+	 * Climbs one folder per extra URL segment of site_url, but only when ABSPATH ends in
+	 * exactly those segments (e.g. /var/www/html/wp for site_url .../wp). If the URL does
+	 * not mirror the filesystem (rewrites, aliases), ABSPATH is returned unchanged.
 	 */
 	public static function detect( string $abspath, string $siteUrl, string $homeUrl ): string {
 		$base = self::normalize( $abspath );
@@ -23,11 +27,13 @@ final class BackupRoot {
 			return $base;
 		}
 
-		for ( $i = count( $site ) - count( $home ); $i > 0; $i-- ) {
-			$base = dirname( $base );
+		$extra    = array_slice( $site, count( $home ) );
+		$segments = array_values( array_filter( explode( '/', $base ), 'strlen' ) );
+		if ( count( $segments ) < count( $extra ) || array_slice( $segments, -count( $extra ) ) !== $extra ) {
+			return $base;
 		}
 
-		return $base;
+		return '/' . implode( '/', array_slice( $segments, 0, count( $segments ) - count( $extra ) ) );
 	}
 
 	/**
@@ -67,7 +73,7 @@ final class BackupRoot {
 	private static function urlSegments( string $url ): array {
 		$path = parse_url( $url, PHP_URL_PATH );
 
-		return array_values( array_filter( explode( '/', trim( is_string( $path ) ? $path : '', '/' ) ), 'strlen' ) );
+		return array_values( array_map( 'rawurldecode', array_filter( explode( '/', trim( is_string( $path ) ? $path : '', '/' ) ), 'strlen' ) ) );
 	}
 
 	/**
