@@ -546,6 +546,39 @@ final class JobRunnerTest extends TestCase {
 		$this->assertFileExists( $this->workDir->path( 'runner.lock' ), 'the lock file is never deleted' );
 	}
 
+	public function test_local_storage_dir_inside_backup_root_is_excluded(): void {
+		// Development mode with WP_PCLOUD_BACKUP_STORAGE_DIR under the site: earlier generations must not be backed up again.
+		$this->remote = $this->site . '/wp-content/wppb-remote/';
+		mkdir( $this->site . '/wp-content/wppb-remote/WPBackup/example.com/2020-01-01_000000', 0777, true );
+		file_put_contents( $this->site . '/wp-content/wppb-remote/WPBackup/example.com/2020-01-01_000000/files.zip.001', 'old generation' );
+
+		$runner = new JobRunner(
+			$this->settings,
+			$this->workDir,
+			new LocalStorage( $this->remote ),
+			new Notifier( $this->settings, 'example.com', 'https://example.com/wp-admin/' ),
+			new History(),
+			$this->wpdb(),
+			$this->clock(),
+			new \DateTimeZone( 'Asia/Tokyo' ),
+			array(
+				'site_url'       => 'https://example.com',
+				'home_url'       => 'https://example.com',
+				'wp_version'     => '6.6',
+				'plugin_version' => '1.0.0-test',
+				'abspath'        => $this->site . '/',
+				'storage_dir'    => $this->remote,
+			)
+		);
+
+		$this->assertTrue( $runner->startJob( 'manual' ) );
+		$this->runToEnd( $runner );
+
+		$generations = glob( $this->siteRemote() . '/2*', GLOB_ONLYDIR );
+		$this->assertCount( 2, $generations );
+		$this->assertArchiveMatches( end( $generations ), $this->files );
+	}
+
 	public function test_each_run_respects_budget_except_upload(): void {
 		$slowUploads = 0;
 		$storage     = $this->decoratedStorage(

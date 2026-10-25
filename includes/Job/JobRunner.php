@@ -176,7 +176,7 @@ final class JobRunner {
 	 * @param \wpdb            $wpdb  Database access object.
 	 * @param callable|null    $clock fn(): int, defaults to time().
 	 * @param \DateTimeZone|null $tz  Site timezone, defaults to UTC.
-	 * @param array            $env   Overrides for site_url, home_url, wp_version, plugin_version, abspath.
+	 * @param array            $env   Overrides for site_url, home_url, wp_version, plugin_version, abspath, storage_dir.
 	 */
 	public function __construct( Settings $s, WorkDir $w, StorageInterface $st, Notifier $n, History $h, $wpdb, ?callable $clock = null, ?\DateTimeZone $tz = null, array $env = array() ) {
 		$this->settings = $s;
@@ -1179,17 +1179,20 @@ final class JobRunner {
 	}
 
 	/**
-	 * Configured excludes plus the work directory when it lies inside the backup root.
+	 * Configured excludes plus the work directory and the local storage directory
+	 * (development mode) when they lie inside the backup root.
 	 *
 	 * @return string[]
 	 */
 	private function excludes(): array {
 		$excludes = array_values( (array) $this->settings->get( 'excludes' ) );
 		$root     = $this->backupRoot() . '/';
-		$work     = $this->workDir->path();
 
-		if ( 0 === strpos( $work, $root ) ) {
-			$excludes[] = substr( $work, strlen( $root ) );
+		foreach ( array( $this->workDir->path(), $this->envValue( 'storage_dir' ) ) as $dir ) {
+			$dir = rtrim( $dir, '/\\' );
+			if ( '' !== $dir && 0 === strpos( $dir . '/', $root ) && $dir . '/' !== $root ) {
+				$excludes[] = substr( $dir, strlen( $root ) );
+			}
 		}
 
 		return $excludes;
@@ -1253,6 +1256,8 @@ final class JobRunner {
 				return defined( 'WP_PCLOUD_BACKUP_VERSION' ) ? (string) constant( 'WP_PCLOUD_BACKUP_VERSION' ) : 'dev';
 			case 'abspath':
 				return defined( 'ABSPATH' ) ? (string) ABSPATH : '';
+			case 'storage_dir':
+				return defined( 'WP_PCLOUD_BACKUP_STORAGE_DIR' ) ? (string) constant( 'WP_PCLOUD_BACKUP_STORAGE_DIR' ) : '';
 		}
 
 		return '';
