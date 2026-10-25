@@ -247,7 +247,18 @@ final class JobRunner {
 		}
 
 		$slot = $this->nextRunAt( $now );
-		if ( $slot <= $now && $this->startJob( 'schedule', $slot ) ) {
+		if ( $slot > $now ) {
+			return $this->status();
+		}
+
+		// The slot already had its job (a crash between startJob() and the next_run update):
+		// move on to the next slot instead of backing it up twice.
+		if ( (int) $this->settings->get( 'last_scheduled' ) >= $slot ) {
+			$this->settings->update( array( 'next_run' => $this->gridAfter( $slot, $now ) ) );
+			return $this->status();
+		}
+
+		if ( $this->startJob( 'schedule', $slot ) ) {
 			$this->settings->update( array( 'next_run' => $this->gridAfter( $slot, $now ) ) );
 			return $this->run();
 		}

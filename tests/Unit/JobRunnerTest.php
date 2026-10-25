@@ -1446,4 +1446,23 @@ final class JobRunnerTest extends TestCase {
 		$runner->run();
 		$this->assertNotSame( $first, $this->readState()['file_prefix'] . '-' );
 	}
+	public function test_tick_does_not_start_a_second_job_for_a_slot_that_already_had_one(): void {
+		$this->workDir->ensure();
+		$runner     = $this->runner();
+		$this->tick = 0;
+		$slot       = $this->now - 600;
+
+		// A scheduled job for $slot was created, then the process died before next_run moved on;
+		// that job has since finished (or was aborted), so no state exists.
+		$this->values['last_scheduled'] = $slot;
+		$this->values['next_run']       = $slot;
+
+		$status = $runner->tick();
+
+		$this->assertFalse( $status['running'], 'no duplicate job' );
+		$this->assertFileDoesNotExist( $this->stateFile() );
+		$this->assertSame( $slot, $this->values['last_scheduled'] );
+		$this->assertSame( Scheduler::nextRun( 'daily', '03:00', Scheduler::offsetMinutes( 'example.com' ), $slot, $this->now, new \DateTimeZone( 'Asia/Tokyo' ) ), $this->values['next_run'] );
+		$this->assertGreaterThan( $this->now, $this->values['next_run'] );
+	}
 }
