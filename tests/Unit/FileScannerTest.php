@@ -262,4 +262,30 @@ final class FileScannerTest extends TestCase {
 		$this->assertContains( 'unreadable file: a.txt', $scanner->state()['warnings'] );
 		$this->assertSame( 4, $scanner->state()['files'] );
 	}
+	public function test_large_files_are_listed_with_a_warning(): void {
+		$never = static function (): bool {
+			return false;
+		};
+
+		// Threshold 10 bytes: only files of 10 bytes or more are flagged ("data-a.txt" is exactly 10).
+		$scanner = new FileScanner( $this->root, array(), $this->out . '/filelist.jsonl', array(), 10 );
+		$this->assertTrue( $scanner->run( $never ) );
+
+		$this->assertCount( 5, $this->readList(), 'large files are still listed' );
+		$warnings = $scanner->state()['warnings'];
+		$this->assertContains( 'large file (0 MB, may not fit in one run): a.txt', $warnings );
+		$this->assertCount( 5, $warnings );
+
+		// The default threshold (500 MB) flags none of the small fixture files; 0 disables the check.
+		unlink( $this->out . '/filelist.jsonl' );
+		$scanner = new FileScanner( $this->root, array(), $this->out . '/filelist.jsonl' );
+		$scanner->run( $never );
+		$this->assertSame( array(), $scanner->state()['warnings'] );
+		$this->assertSame( 524288000, FileScanner::LARGE_FILE_BYTES );
+
+		unlink( $this->out . '/filelist.jsonl' );
+		$scanner = new FileScanner( $this->root, array(), $this->out . '/filelist.jsonl', array(), 0 );
+		$scanner->run( $never );
+		$this->assertSame( array(), $scanner->state()['warnings'] );
+	}
 }

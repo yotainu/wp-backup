@@ -552,4 +552,86 @@ final class TriggerTest extends TestCase {
 		$this->assertSame( array(), $this->mails );
 		$this->assertSame( self::NOW, $this->options[ Settings::OPTION ]['activated_at'] );
 	}
+	// ------------------------------------------------------------------
+	// Exceptions that escape the runner never become fatal errors.
+	// ------------------------------------------------------------------
+
+	private function throwingRunner(): object {
+		return new class() {
+			/** @var string[] */
+			public $recorded = array();
+
+			public function tick(): array {
+				throw new \RuntimeException( 'Could not write job state: /var/www/html/wp-content/uploads/wp-pcloud-backup-abc/state.json.tmp' );
+			}
+
+			public function run(): array {
+				throw new \Error( 'boom' );
+			}
+
+			public function startJob( string $trigger, ?int $slot = null ): bool {
+				throw new \RuntimeException( 'Could not create the work directory.' );
+			}
+
+			public function status(): array {
+				return array( 'running' => true, 'step' => 'zip', 'message' => 'zip', 'last_error' => null );
+			}
+
+			public function recordError( string $message ): void {
+				$this->recorded[] = $message;
+			}
+		};
+	}
+
+	public function test_exceptions_from_the_runner_become_an_error_status(): void {
+		$runner  = $this->throwingRunner();
+		$trigger = $this->trigger( $this->settings( array( 'use_wp_cron' => true, 'cron_key' => self::KEY ) ), $runner );
+		$sent    = array();
+
+		Functions\when( 'check_ajax_referer' )->justReturn( 1 );
+		Functions\when( 'current_user_can' )->justReturn( true );
+		Functions\when( 'nocache_headers' )->justReturn( null );
+		Functions\when( 'wp_send_json' )->alias(
+			static function ( $data ) use ( &$sent ) {
+				$sent[] = $data;
+			}
+		);
+
+		$trigger->onCron();
+		$trigger->handleUrl( self::KEY );
+		$trigger->ajaxStart();
+		$trigger->ajaxRun();
+
+		$this->assertCount( 3, $sent );
+		$this->assertSame( 'Could not write job state: state.json.tmp', $sent[0]['last_error'], 'no server path in the public URL response' );
+		$this->assertSame( 'zip', $sent[0]['step'], 'the job status is still reported' );
+		$this->assertStringContainsString( '実行中にエラーが発生しました', $sent[0]['message'] );
+		$this->assertSame( 'Could not create the work directory.', $sent[1]['last_error'] );
+		$this->assertSame( 'boom', $sent[2]['last_error'] );
+		$this->assertSame(
+			array( 'Could not write job state: state.json.tmp', 'Could not write job state: state.json.tmp', 'Could not create the work directory.', 'boom' ),
+			$runner->recorded
+		);
+	}
+
+	public function test_url_response_strips_paths_from_the_job_error(): void {
+		$runner  = new class() {
+			public function tick(): array {
+				return array( 'running' => true, 'last_error' => 'Cannot open SQL file: ' . ABSPATH . 'wp-content/uploads/wp-pcloud-backup-abc/x-database.sql' );
+			}
+		};
+		$trigger = $this->trigger( $this->settings( array( 'cron_key' => self::KEY ) ), $runner );
+		$sent    = null;
+
+		Functions\when( 'nocache_headers' )->justReturn( null );
+		Functions\when( 'wp_send_json' )->alias(
+			static function ( $data ) use ( &$sent ) {
+				$sent = $data;
+			}
+		);
+
+		$trigger->handleUrl( self::KEY );
+
+		$this->assertSame( 'Cannot open SQL file: x-database.sql', $sent['last_error'] );
+	}
 }

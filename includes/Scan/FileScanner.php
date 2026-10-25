@@ -11,6 +11,19 @@ namespace WpPcloudBackup\Scan;
 class FileScanner {
 
 	/**
+	 * Files at least this large get a warning (default; see the constructor). A file is zipped
+	 * within one run, so a very large one may not fit in the PHP time limit.
+	 */
+	public const LARGE_FILE_BYTES = 524288000;
+
+	/**
+	 * Size from which a listed file gets a "large file" warning.
+	 *
+	 * @var int
+	 */
+	private $largeFileBytes;
+
+	/**
 	 * Absolute root directory, without trailing slash.
 	 *
 	 * @var string
@@ -64,10 +77,12 @@ class FileScanner {
 	 * @param string[] $excludes Relative paths to exclude; a trailing `*` is a prefix wildcard.
 	 * @param string   $listFile Absolute path of the JSONL file to append to.
 	 * @param array    $state    State previously returned by state(), to resume.
+	 * @param int      $largeFileBytes Files of this size or more are listed with a warning (0 = never).
 	 */
-	public function __construct( string $root, array $excludes, string $listFile, array $state = array() ) {
-		$this->root     = rtrim( $root, '/\\' );
-		$this->listFile = $listFile;
+	public function __construct( string $root, array $excludes, string $listFile, array $state = array(), int $largeFileBytes = self::LARGE_FILE_BYTES ) {
+		$this->root           = rtrim( $root, '/\\' );
+		$this->listFile       = $listFile;
+		$this->largeFileBytes = $largeFileBytes;
 
 		foreach ( $excludes as $exclude ) {
 			$exclude = trim( str_replace( '\\', '/', trim( (string) $exclude ) ), '/' );
@@ -193,6 +208,10 @@ class FileScanner {
 		fwrite( $handle, $line . "\n" );
 		++$this->files;
 		$this->bytes += $size;
+
+		if ( $this->largeFileBytes > 0 && $size >= $this->largeFileBytes ) {
+			$this->warnings[] = sprintf( 'large file (%d MB, may not fit in one run): %s', intdiv( $size, 1048576 ), $relPath );
+		}
 	}
 
 	/**

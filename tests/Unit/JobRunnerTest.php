@@ -279,7 +279,7 @@ final class JobRunnerTest extends TestCase {
 		};
 	}
 
-	private function runner( StorageInterface $storage = null, FakeWpdb $wpdb = null ): JobRunner {
+	private function runner( StorageInterface $storage = null, FakeWpdb $wpdb = null, callable $clock = null ): JobRunner {
 		return new JobRunner(
 			$this->settings,
 			$this->workDir,
@@ -287,7 +287,7 @@ final class JobRunnerTest extends TestCase {
 			new Notifier( $this->settings, 'example.com', 'https://example.com/wp-admin/' ),
 			new History(),
 			$wpdb ?? $this->wpdb(),
-			$this->clock(),
+			$clock ?? $this->clock(),
 			new \DateTimeZone( 'Asia/Tokyo' ),
 			array(
 				'site_url'       => 'https://example.com',
@@ -407,9 +407,10 @@ final class JobRunnerTest extends TestCase {
 	/**
 	 * @param callable      $onUpload fn( string $name ): void, called before each upload.
 	 * @param callable|null $onRename fn( StorageInterface $inner, int $id, string $name ): void, replaces renameFolder.
+	 * @param callable|null $onEnsure fn( string $path ): void, called before each ensureFolder.
 	 */
-	private function decoratedStorage( callable $onUpload, ?callable $onRename = null ): StorageInterface {
-		return new class( new LocalStorage( $this->remote ), $onUpload, $onRename ) implements StorageInterface {
+	private function decoratedStorage( callable $onUpload, ?callable $onRename = null, ?callable $onEnsure = null ): StorageInterface {
+		return new class( new LocalStorage( $this->remote ), $onUpload, $onRename, $onEnsure ) implements StorageInterface {
 			/**
 			 * @var StorageInterface
 			 */
@@ -425,13 +426,22 @@ final class JobRunnerTest extends TestCase {
 			 */
 			private $onRename;
 
-			public function __construct( StorageInterface $inner, callable $onUpload, ?callable $onRename ) {
+			/**
+			 * @var callable|null
+			 */
+			private $onEnsure;
+
+			public function __construct( StorageInterface $inner, callable $onUpload, ?callable $onRename, ?callable $onEnsure ) {
 				$this->inner    = $inner;
 				$this->onUpload = $onUpload;
 				$this->onRename = $onRename;
+				$this->onEnsure = $onEnsure;
 			}
 
 			public function ensureFolder( string $path ): int {
+				if ( null !== $this->onEnsure ) {
+					( $this->onEnsure )( $path );
+				}
 				return $this->inner->ensureFolder( $path );
 			}
 
@@ -1143,5 +1153,180 @@ final class JobRunnerTest extends TestCase {
 			),
 			$status
 		);
+	}
+	/**
+	 * Emulate a process that dies at the moment $snapshot was taken: put that state back on disk
+	 * (last_run_finished never written) and move the clock past the rapid-fire guard.
+	 */
+	private function dieAt( string $snapshot ): void {
+		$this->assertFileExists( $snapshot );
+		copy( $snapshot, $this->stateFile() );
+		unlink( $snapshot );
+		$this->now += self::BUDGET * 3;
+	}
+
+	public function test_runs_that_die_are_counted_as_attempts_and_abort_after_five(): void {
+		$snapshot = $this->base . '/state-at-death.json';
+		$deaths   = 0;
+		$seen     = array();
+		$storage  = $this->decoratedStorage(
+			static function () {
+			},
+			null,
+			function () use ( $snapshot, &$deaths, &$seen ) {
+				// The process "dies" in the first remote call of every run: dieAt() later puts
+				// this state back, discarding whatever the run did afterwards.
+				if ( is_file( $snapshot ) ) {
+					return;
+				}
+				++$deaths;
+				$state  = $this->readState();
+				$seen[] = array( (int) ( $state['attempts']['prepare'] ?? 0 ), $state['last_error'] );
+				copy( $this->stateFile(), $snapshot );
+			}
+		);
+		$runner   = $this->runner( $storage );
+		$runner->startJob( 'manual' );
+
+		$runner->run();
+		$this->dieAt( $snapshot );
+		$runner->run();
+		$this->dieAt( $snapshot );
+		$runner->run();
+		$this->dieAt( $snapshot );
+
+		$this->assertSame( 2, (int) $this->readState()['attempts']['prepare'], 'two runs died after the first one' );
+		$this->assertSame( array( 0, null ), $seen[0] );
+		$this->assertSame( 1, $seen[1][0] );
+		$this->assertSame( '前回の実行が途中で終了しました（時間制限/メモリ不足の可能性。処理中: prepare）', $seen[1][1] );
+
+		$runner->run();
+		$this->dieAt( $snapshot );
+		$runner->run();
+		$this->dieAt( $snapshot );
+		$this->assertSame( 4, (int) $this->readState()['attempts']['prepare'] );
+		$this->assertSame( array(), $this->mails );
+
+		// The fifth unfinished run aborts the job before anything else runs.
+		$status = $runner->run();
+
+		$this->assertSame( 5, $deaths );
+		$this->assertFalse( $status['running'] );
+		$this->assertSame( array(), $this->leftoverJobFiles() );
+		$this->assertCount( 1, $this->mails );
+		$this->assertStringContainsString( '試行回数: 5', $this->mails[0][2] );
+		$this->assertStringContainsString( '前回の実行が途中で終了しました', $this->mails[0][2] );
+		$history = ( new History() )->all();
+		$this->assertSame( 'failed', $history[0]['result'] );
+		$this->assertStringContainsString( '処理中: prepare', $history[0]['message'] );
+	}
+
+	public function test_a_run_that_dies_while_zipping_names_the_file(): void {
+		$snapshot = $this->base . '/state-in-addfile.json';
+		$inFlight = array();
+		$runner   = null;
+		$clock    = function () use ( $snapshot, &$inFlight ): int {
+			$time       = $this->now;
+			$this->now += $this->tick;
+
+			// timeUp() after an entry: the state on disk is the one saved just before its addFile().
+			if ( is_file( $this->stateFile() ) ) {
+				$state = $this->readState();
+				if ( 'zip' === $state['step'] && null !== ( $state['in_progress_file'] ?? null ) ) {
+					$inFlight[] = $state['in_progress_file'];
+					if ( ! is_file( $snapshot ) && count( $inFlight ) >= 5 ) {
+						copy( $this->stateFile(), $snapshot );
+					}
+				}
+			}
+
+			return $time;
+		};
+		$runner   = $this->runner( null, null, $clock );
+		$runner->startJob( 'manual' );
+
+		for ( $i = 0; $i < self::MAX_RUNS && ! is_file( $snapshot ); $i++ ) {
+			$runner->run();
+		}
+		$this->assertFileExists( $snapshot );
+		foreach ( $inFlight as $path ) {
+			$this->assertArrayHasKey( $path, $this->files, 'in_progress_file is a listed file' );
+		}
+		$dying = json_decode( (string) file_get_contents( $snapshot ), true )['in_progress_file'];
+
+		$this->dieAt( $snapshot );
+		$status = $runner->run();
+
+		$this->assertStringContainsString( '処理中: ' . $dying . '）', (string) $this->readState()['last_error'] );
+		$this->assertSame( 1, (int) $this->readState()['attempts']['zip'] );
+		$this->assertTrue( $status['running'] );
+
+		$this->runToEnd( $runner );
+		$this->assertArchiveMatches( $this->onlyGeneration(), $this->files );
+		$this->assertSame( 'success', ( new History() )->all()[0]['result'] );
+	}
+
+	public function test_fatal_error_is_recorded_without_paths_and_reported_by_the_next_run(): void {
+		$seen    = array();
+		$storage = $this->decoratedStorage(
+			static function () {
+			},
+			null,
+			function () use ( &$seen ) {
+				$seen[] = $this->readState();
+			}
+		);
+		$runner  = $this->runner( $storage );
+		$runner->startJob( 'manual' );
+
+		// A run started and hit a fatal error: last_run_finished was never written.
+		$state                      = $this->readState();
+		$state['last_run_started']  = $this->now;
+		$state['last_run_finished'] = 0;
+		$this->writeState( $state );
+
+		$runner->recordFatal( array( 'type' => E_WARNING, 'message' => 'not fatal', 'file' => '/x/y.php', 'line' => 1 ) );
+		$this->assertArrayNotHasKey( 'last_fatal', $this->readState() );
+
+		$runner->recordFatal(
+			array(
+				'type'    => E_ERROR,
+				'message' => 'Allowed memory size of 134217728 bytes exhausted in /var/www/html/wp-content/plugins/wp-pcloud-backup/includes/Zip/ZipWriter.php',
+				'file'    => '/var/www/html/wp-content/plugins/wp-pcloud-backup/includes/Zip/ZipWriter.php',
+				'line'    => 301,
+			)
+		);
+		$fatal = $this->readState()['last_fatal'];
+		$this->assertSame( E_ERROR, $fatal['type'] );
+		$this->assertSame( 'Allowed memory size of 134217728 bytes exhausted in ZipWriter.php', $fatal['message'] );
+		$this->assertSame( 'ZipWriter.php:301', $fatal['file'] );
+		$this->assertSame( 0, $this->readState()['last_run_finished'], 'the next run still sees an unfinished run' );
+
+		$this->now += self::BUDGET * 3;
+		$runner->run();
+
+		$this->assertNotEmpty( $seen );
+		$this->assertSame( 1, (int) $seen[0]['attempts']['prepare'] );
+		$this->assertSame(
+			'前回の実行が途中で終了しました（時間制限/メモリ不足の可能性。処理中: prepare） Allowed memory size of 134217728 bytes exhausted in ZipWriter.php (ZipWriter.php:301)',
+			$seen[0]['last_error']
+		);
+		$this->assertNull( $seen[0]['last_fatal'], 'used once' );
+	}
+
+	public function test_without_paths_keeps_basenames_only(): void {
+		$this->assertSame( "Cannot open SQL file: database.sql", JobRunner::withoutPaths( 'Cannot open SQL file: /home/u/www/wp-content/uploads/wp-pcloud-backup-abc/database.sql' ) );
+		$this->assertSame( 'Part file is missing: x.001', JobRunner::withoutPaths( 'Part file is missing: /tmp/x.001' ) );
+		$this->assertSame( '1/2 done, HTTP 500', JobRunner::withoutPaths( '1/2 done, HTTP 500' ) );
+	}
+
+	public function test_record_error_sets_last_error_of_the_job(): void {
+		$runner = $this->runner();
+		$runner->recordError( 'nothing to record' ); // No job: no error.
+		$runner->startJob( 'manual' );
+
+		$runner->recordError( 'escaped' );
+
+		$this->assertSame( 'escaped', $this->readState()['last_error'] );
 	}
 }

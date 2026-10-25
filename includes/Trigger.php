@@ -2,6 +2,8 @@
 
 namespace WpPcloudBackup;
 
+use WpPcloudBackup\Job\JobRunner;
+
 /**
  * Entry points that advance the backup: WP-Cron, the secret external URL and
  * the admin AJAX endpoints.
@@ -78,13 +80,17 @@ class Trigger {
 			return;
 		}
 
-		$runner = $this->runner();
-		if ( null === $runner ) {
-			return;
-		}
+		$this->guarded(
+			function (): array {
+				$runner = $this->runner();
+				if ( null === $runner ) {
+					return self::notConnectedStatus();
+				}
 
-		$this->beforeLongRun();
-		$runner->tick();
+				$this->beforeLongRun();
+				return $runner->tick();
+			}
+		);
 	}
 
 	public function onInit(): void {
@@ -113,14 +119,24 @@ class Trigger {
 		$this->recordUrlHit();
 		$this->checkStale();
 
-		$runner = $this->runner();
-		if ( null === $runner ) {
-			wp_send_json( self::notConnectedStatus() );
-			return;
+		$status = $this->guarded(
+			function (): array {
+				$runner = $this->runner();
+				if ( null === $runner ) {
+					return self::notConnectedStatus();
+				}
+
+				$this->beforeLongRun();
+				return $runner->tick();
+			}
+		);
+
+		// The URL is reachable from outside: never reveal server paths.
+		if ( isset( $status['last_error'] ) && is_string( $status['last_error'] ) ) {
+			$status['last_error'] = JobRunner::withoutPaths( $status['last_error'] );
 		}
 
-		$this->beforeLongRun();
-		wp_send_json( $runner->tick() );
+		wp_send_json( $status );
 	}
 
 	/**
@@ -140,15 +156,20 @@ class Trigger {
 			return;
 		}
 
-		$runner = $this->runner();
-		if ( null === $runner ) {
-			wp_send_json( self::notConnectedStatus() );
-			return;
-		}
+		wp_send_json(
+			$this->guarded(
+				function (): array {
+					$runner = $this->runner();
+					if ( null === $runner ) {
+						return self::notConnectedStatus();
+					}
 
-		$this->beforeLongRun();
-		$runner->startJob( 'manual' );
-		wp_send_json( $runner->run() );
+					$this->beforeLongRun();
+					$runner->startJob( 'manual' );
+					return $runner->run();
+				}
+			)
+		);
 	}
 
 	public function ajaxRun(): void {
@@ -156,14 +177,19 @@ class Trigger {
 			return;
 		}
 
-		$runner = $this->runner();
-		if ( null === $runner ) {
-			wp_send_json( self::notConnectedStatus() );
-			return;
-		}
+		wp_send_json(
+			$this->guarded(
+				function (): array {
+					$runner = $this->runner();
+					if ( null === $runner ) {
+						return self::notConnectedStatus();
+					}
 
-		$this->beforeLongRun();
-		wp_send_json( $runner->run() );
+					$this->beforeLongRun();
+					return $runner->run();
+				}
+			)
+		);
 	}
 
 	public function ajaxStatus(): void {
@@ -171,8 +197,14 @@ class Trigger {
 			return;
 		}
 
-		$runner = $this->runner();
-		wp_send_json( null === $runner ? self::notConnectedStatus() : $runner->status() );
+		wp_send_json(
+			$this->guarded(
+				function (): array {
+					$runner = $this->runner();
+					return null === $runner ? self::notConnectedStatus() : $runner->status();
+				}
+			)
+		);
 	}
 
 	public function cronUrl(): string {
@@ -222,6 +254,40 @@ class Trigger {
 			@set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 		}
 		ignore_user_abort( true );
+	}
+
+	/**
+	 * Run an entry point's work; an exception or error that escaped the runner becomes the
+	 * job's last_error (when a job exists) and an error status, never a fatal error.
+	 *
+	 * @param callable $work fn(): array status.
+	 */
+	private function guarded( callable $work ): array {
+		try {
+			return (array) $work();
+		} catch ( \Throwable $e ) {
+			$message = JobRunner::withoutPaths( $e->getMessage() );
+			$status  = null;
+
+			try {
+				$runner = $this->runner();
+				if ( null !== $runner ) {
+					if ( method_exists( $runner, 'recordError' ) ) {
+						$runner->recordError( $message );
+					}
+					$status = (array) $runner->status();
+				}
+			} catch ( \Throwable $ignored ) {
+				unset( $ignored );
+			}
+
+			$status               = $status ?? self::notConnectedStatus();
+			/* translators: %s: error message. */
+			$status['message']    = sprintf( __( '実行中にエラーが発生しました: %s', 'wp-pcloud-backup' ), $message );
+			$status['last_error'] = $message;
+
+			return $status;
+		}
 	}
 
 	/**

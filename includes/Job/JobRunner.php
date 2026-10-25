@@ -34,7 +34,10 @@ use WpPcloudBackup\Zip\ZipWriter;
  *   attempts           array    step => consecutive failures of that step.
  *   last_error         string|null Message of the last failure.
  *   last_run_started   int      Start of the last run (epoch).
- *   last_run_finished  int      End of the last run (epoch); older than last_run_started = the run died.
+ *   last_run_finished  int      End of the last run (epoch); older than last_run_started = the run died
+ *                               (counted as a failed attempt of the current step by the next run).
+ *   in_progress_file   string|null Relative path the zip step is adding (saved before addFile).
+ *   last_fatal         array|null  {type, message, file} of a fatal error recorded by the shutdown handler.
  *   site_folder_id     int      Remote root_folder/site_folder.
  *   incomplete_id      int      Remote .incomplete-{stamp} folder.
  *   scanner            array    FileScanner::state().
@@ -175,6 +178,27 @@ final class JobRunner {
 	private $lock = null;
 
 	/**
+	 * Runner whose run is executing, for the shutdown handler (null between runs).
+	 *
+	 * @var JobRunner|null
+	 */
+	private static $running = null;
+
+	/**
+	 * Whether the shutdown handler is registered (once per process).
+	 *
+	 * @var bool
+	 */
+	private static $shutdownRegistered = false;
+
+	/**
+	 * Memory released by the shutdown handler so it can still save after an out-of-memory error.
+	 *
+	 * @var string|null
+	 */
+	private static $reserve = null;
+
+	/**
 	 * @param Settings         $s     Settings.
 	 * @param WorkDir          $w     Work directory.
 	 * @param StorageInterface $st    Remote storage.
@@ -305,9 +329,15 @@ final class JobRunner {
 				return $this->status();
 			}
 
+			// The previous run died (fatal error, time limit, out of memory): a failed attempt of its step.
+			if ( $lastStarted > 0 && $lastFinished < $lastStarted && $this->countUnfinishedRun() ) {
+				return $this->status();
+			}
+
 			$this->state->set( 'last_run_started', $now );
 			$this->state->save();
 			$tracked = true;
+			$this->watchForFatalErrors();
 
 			// Once the manifest is uploaded the generation is complete: never time it out.
 			if ( ! $this->state->get( 'manifest_uploaded' ) && (int) $this->state->get( 'started', $now ) + self::MAX_JOB_SECONDS < $now ) {
@@ -322,6 +352,10 @@ final class JobRunner {
 				}
 			);
 		} finally {
+			if ( $this === self::$running ) {
+				self::$running = null;
+				self::$reserve = null;
+			}
 			if ( $tracked && null !== $this->state ) {
 				try {
 					$this->state->set( 'last_run_finished', $this->now() );
@@ -450,9 +484,129 @@ final class JobRunner {
 		}
 	}
 
+	/**
+	 * Record a fatal error of the current run in the state (called from the shutdown handler).
+	 *
+	 * Reloads the state from disk, so progress that was never saved is not persisted. Only the
+	 * basename of files is kept. last_run_finished stays behind, so the next run counts the attempt.
+	 *
+	 * @internal
+	 * @param array|null $error Value of error_get_last().
+	 */
+	public function recordFatal( ?array $error ): void {
+		$fatal = array( E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR, E_RECOVERABLE_ERROR );
+		if ( null === $error || ! in_array( (int) ( $error['type'] ?? 0 ), $fatal, true ) ) {
+			return;
+		}
+
+		try {
+			$state = $this->loadState();
+			if ( null === $state ) {
+				return;
+			}
+			$state->set(
+				'last_fatal',
+				array(
+					'type'    => (int) $error['type'],
+					'message' => self::withoutPaths( (string) ( $error['message'] ?? '' ) ),
+					'file'    => basename( (string) ( $error['file'] ?? '' ) ) . ':' . (int) ( $error['line'] ?? 0 ),
+				)
+			);
+			$state->save();
+		} catch ( \Throwable $e ) {
+			unset( $e );
+		}
+	}
+
+	/**
+	 * Store a message as last_error of the current job, if there is one (used by Trigger for
+	 * exceptions that escaped a run). Best effort: never throws.
+	 */
+	public function recordError( string $message ): void {
+		try {
+			$state = $this->loadState();
+			if ( null !== $state ) {
+				$state->set( 'last_error', $message );
+				$state->save();
+			}
+		} catch ( \Throwable $e ) {
+			unset( $e );
+		}
+	}
+
+	/**
+	 * Drop directory parts of absolute paths in a message, keeping basenames.
+	 */
+	public static function withoutPaths( string $message ): string {
+		return (string) preg_replace( '#(?<![\w.])/(?:[^/\s\'"()]+/)+#u', '', $message );
+	}
+
 	// ------------------------------------------------------------------
 	// Run loop and failure policy.
 	// ------------------------------------------------------------------
+
+	/**
+	 * Count the previous, unfinished run as a failed attempt of the current step.
+	 *
+	 * @return bool True when the job was aborted (MAX_ATTEMPTS reached).
+	 */
+	private function countUnfinishedRun(): bool {
+		$step     = (string) $this->state->get( 'step', 'prepare' );
+		$file     = $this->state->get( 'in_progress_file' );
+		$fatal    = $this->state->get( 'last_fatal' );
+		$attempts = (array) $this->state->get( 'attempts', array() );
+
+		$attempts[ $step ] = (int) ( $attempts[ $step ] ?? 0 ) + 1;
+
+		$message = sprintf(
+			/* translators: %s: file or step that was being processed. */
+			__( '前回の実行が途中で終了しました（時間制限/メモリ不足の可能性。処理中: %s）', 'wp-pcloud-backup' ),
+			is_string( $file ) && '' !== $file ? $file : $step
+		);
+		if ( is_array( $fatal ) && isset( $fatal['message'] ) ) {
+			$message .= ' ' . $fatal['message'] . ' (' . ( $fatal['file'] ?? '' ) . ')';
+		}
+
+		$this->state->merge(
+			array(
+				'attempts'   => $attempts,
+				'last_error' => $message,
+				'last_fatal' => null,
+			)
+		);
+
+		// After the rename the generation is complete: keep retrying, never fail the job.
+		$complete = 'finalize' === $step && $this->state->get( 'renamed' );
+		if ( ! $complete && $attempts[ $step ] >= self::MAX_ATTEMPTS ) {
+			$this->abort( $message );
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
+	 * Arm the shutdown handler for this run. It is registered once per process and holds no
+	 * reference to a runner between runs.
+	 */
+	private function watchForFatalErrors(): void {
+		self::$running = $this;
+		self::$reserve = str_repeat( ' ', 65536 );
+
+		if ( self::$shutdownRegistered ) {
+			return;
+		}
+		self::$shutdownRegistered = true;
+
+		register_shutdown_function(
+			static function (): void {
+				self::$reserve = null;
+				if ( null !== self::$running ) {
+					self::$running->recordFatal( error_get_last() );
+				}
+			}
+		);
+	}
 
 	/**
 	 * Execute steps until the budget is used up or a step stops early.
@@ -598,7 +752,7 @@ final class JobRunner {
 			$this->truncateFile( $list, $scanBytes );
 		}
 
-		$scanner = new FileScanner( $this->backupRoot(), $this->excludes(), $list, (array) $this->state->get( 'scanner', array() ) );
+		$scanner = new FileScanner( $this->backupRoot(), $this->excludes(), $list, (array) $this->state->get( 'scanner', array() ), $this->largeFileBytes() );
 		$done    = $scanner->run( $timeUp );
 		$scan    = $scanner->state();
 
@@ -707,29 +861,43 @@ final class JobRunner {
 				throw new \RuntimeException( 'Cannot seek in the file list.' );
 			}
 
+			$progress = function () use ( &$line, &$offset, &$bytes, &$warnings, $zip, $sink ): array {
+				return array(
+					'zip_line'         => $line,
+					'zip_byte_offset'  => $offset,
+					'zip_bytes'        => $bytes,
+					'warnings'         => $warnings,
+					'zip'              => $zip->state(),
+					'parts'            => $sink->state(),
+					'in_progress_file' => null,
+				);
+			};
+
 			while ( true ) {
 				$raw = fgets( $handle );
 
 				if ( false === $raw ) {
 					$zip->finish();
-					$this->state->merge(
-						array(
-							'zip'       => $zip->state(),
-							'parts'     => $sink->state(),
-							'return_to' => 'finalize',
-						)
-					);
+					$this->state->merge( $progress() );
+					$this->state->set( 'return_to', 'finalize' );
 					$this->advance( array() === $sink->pendingUploads() ? 'finalize' : 'upload' );
 
 					return true;
 				}
 
-				$entry = json_decode( rtrim( $raw, "\r\n" ), true );
+				$entry   = json_decode( rtrim( $raw, "\r\n" ), true );
+				$valid   = is_array( $entry ) && isset( $entry['p'] ) && is_string( $entry['p'] );
+				$relPath = $valid ? $entry['p'] : null;
 
-				if ( ! is_array( $entry ) || ! isset( $entry['p'] ) || ! is_string( $entry['p'] ) ) {
+				// Progress up to the previous entry, plus the entry about to be added: if the run
+				// dies inside addFile(), the next run can name the file (see countUnfinishedRun()).
+				$this->state->merge( $progress() );
+				$this->state->set( 'in_progress_file', $relPath );
+				$this->state->save();
+
+				if ( ! $valid ) {
 					$warnings[] = 'invalid file list line: ' . ( $line + 1 );
 				} else {
-					$relPath = $entry['p'];
 					$absPath = $root . '/' . $relPath;
 
 					try {
@@ -751,19 +919,8 @@ final class JobRunner {
 				++$line;
 				$offset += strlen( $raw );
 
-				$this->state->merge(
-					array(
-						'zip_line'        => $line,
-						'zip_byte_offset' => $offset,
-						'zip_bytes'       => $bytes,
-						'warnings'        => $warnings,
-						'zip'             => $zip->state(),
-						'parts'           => $sink->state(),
-					)
-				);
-				$this->state->save();
-
 				if ( array() !== $sink->pendingUploads() ) {
+					$this->state->merge( $progress() );
 					$this->state->set( 'return_to', 'zip' );
 					$this->advance( 'upload' );
 
@@ -771,6 +928,9 @@ final class JobRunner {
 				}
 
 				if ( $timeUp() ) {
+					$this->state->merge( $progress() );
+					$this->state->save();
+
 					return false;
 				}
 			}
@@ -1173,6 +1333,17 @@ final class JobRunner {
 
 	private function siteFolderPath(): string {
 		return rtrim( (string) $this->settings->get( 'root_folder' ), '/' ) . '/' . $this->settings->get( 'site_folder' );
+	}
+
+	/**
+	 * Large-file warning threshold: WP_PCLOUD_BACKUP_LARGE_FILE_MB (0 disables), else FileScanner's default.
+	 */
+	private function largeFileBytes(): int {
+		if ( defined( 'WP_PCLOUD_BACKUP_LARGE_FILE_MB' ) ) {
+			return max( 0, (int) constant( 'WP_PCLOUD_BACKUP_LARGE_FILE_MB' ) ) * 1048576;
+		}
+
+		return FileScanner::LARGE_FILE_BYTES;
 	}
 
 	private function backupRoot(): string {
