@@ -54,6 +54,8 @@ final class Retention {
 	/**
 	 * Delete completed generations beyond $keep (oldest first) and stale incomplete folders.
 	 *
+	 * A folder whose modification time is unknown (0) is never deleted by the TTL rule.
+	 *
 	 * @param int $keep Number of completed generations to keep (at least 1).
 	 * @param int $now  Current UNIX time.
 	 * @return string[] Names of the deleted folders.
@@ -69,7 +71,7 @@ final class Retention {
 		}
 
 		foreach ( $this->incompleteFolders() as $folder ) {
-			if ( $folder['modified'] < $now - $this->incompleteTtl ) {
+			if ( $folder['modified'] > 0 && $folder['modified'] < $now - $this->incompleteTtl ) {
 				$this->storage->deleteFolder( $folder['id'] );
 				$deleted[] = $folder['name'];
 			}
@@ -79,6 +81,8 @@ final class Retention {
 	}
 
 	/**
+	 * `modified` is 0 when the storage reports it missing or non-numeric.
+	 *
 	 * @return array<int, array{id:int,name:string,modified:int}>
 	 */
 	private function folders( string $pattern ): array {
@@ -90,7 +94,7 @@ final class Retention {
 			$folders[] = array(
 				'id'       => (int) $item['id'],
 				'name'     => (string) $item['name'],
-				'modified' => (int) $item['modified'],
+				'modified' => isset( $item['modified'] ) && is_numeric( $item['modified'] ) ? max( 0, (int) $item['modified'] ) : 0,
 			);
 		}
 

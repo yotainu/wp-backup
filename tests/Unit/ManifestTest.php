@@ -79,4 +79,19 @@ final class ManifestTest extends TestCase {
 
 		$this->assertSame( '2026-10-25T03:17:00+09:00', $data['created_at'] );
 	}
+
+	public function test_invalid_utf8_is_substituted_instead_of_failing(): void {
+		$json = Manifest::build(
+			array(
+				'warnings' => array( "bad name \xff.txt" ),
+				'parts'    => array( array( 'name' => "files\xfe.zip.001" ) ),
+			)
+		);
+
+		$this->assertNotSame( '', $json );
+		$data = json_decode( $json, true );
+		$this->assertSame( JSON_ERROR_NONE, json_last_error() );
+		$this->assertSame( "bad name \u{FFFD}.txt", $data['warnings'][0] );
+		$this->assertSame( "files\u{FFFD}.zip.001", $data['parts'][0]['name'] );
+	}
 }

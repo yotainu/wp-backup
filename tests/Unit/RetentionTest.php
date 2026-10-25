@@ -5,6 +5,7 @@ namespace WpPcloudBackup\Tests\Unit;
 use PHPUnit\Framework\TestCase;
 use WpPcloudBackup\Retention;
 use WpPcloudBackup\Storage\LocalStorage;
+use WpPcloudBackup\Tests\Support\ArrayStorage;
 use WpPcloudBackup\Tests\Support\TempDir;
 
 final class RetentionTest extends TestCase {
@@ -39,8 +40,10 @@ final class RetentionTest extends TestCase {
 	}
 
 	/**
-	 * Note: after Brain Monkey has been active in the same process, touch() stores mtime + 1,
-	 * so assertions must not depend on an exact-second boundary.
+	 * Note: once Brain Monkey has run in the same PHP process, Patchwork's file:// stream
+	 * wrapper intercepts touch() and the stored mtime ends up 1 second late. Tests that
+	 * use real mtimes therefore keep an hour of margin; exact boundaries are tested with
+	 * ArrayStorage, which returns the given `modified` values verbatim.
 	 */
 	private function makeFolder( string $name, int $modified ): void {
 		$this->storage->ensureFolder( '/WPBackup/example.com/' . $name );
@@ -121,5 +124,56 @@ final class RetentionTest extends TestCase {
 		$this->assertDirectoryExists( $this->base . '/WPBackup/example.com/.incomplete-garbage' );
 		$this->assertFileExists( $this->base . '/WPBackup/example.com/2026-10-00_000000' );
 		$this->assertFileExists( $this->base . '/WPBackup/example.com/readme.txt' );
+	}
+
+	private function row( int $id, string $name, $modified, bool $isFolder = true ): array {
+		return array(
+			'id'       => $id,
+			'name'     => $name,
+			'isfolder' => $isFolder,
+			'size'     => 0,
+			'modified' => $modified,
+		);
+	}
+
+	public function test_incomplete_ttl_boundary_is_exclusive(): void {
+		$ttl     = 172800;
+		$storage = new ArrayStorage(
+			array(
+				$this->row( 1, '.incomplete-2026-09-01_000000', self::NOW - $ttl ),
+				$this->row( 2, '.incomplete-2026-09-02_000000', self::NOW - $ttl - 1 ),
+				$this->row( 3, '.incomplete-2026-09-03_000000', self::NOW - $ttl + 1 ),
+			)
+		);
+
+		$deleted = ( new Retention( $storage, 0, $ttl ) )->prune( 3, self::NOW );
+
+		$this->assertSame( array( '.incomplete-2026-09-02_000000' ), $deleted );
+		$this->assertSame( array( 2 ), $storage->deletedFolders );
+	}
+
+	public function test_incomplete_folder_with_unknown_modified_is_never_pruned(): void {
+		$storage = new ArrayStorage(
+			array(
+				$this->row( 1, '.incomplete-2026-09-01_000000', 0 ),
+				$this->row( 2, '.incomplete-2026-09-02_000000', null ),
+				$this->row( 3, '.incomplete-2026-09-03_000000', 'unknown' ),
+				array(
+					'id'       => 4,
+					'name'     => '.incomplete-2026-09-04_000000',
+					'isfolder' => true,
+				),
+				$this->row( 5, '.incomplete-2026-09-05_000000', -5 ),
+				$this->row( 6, '.incomplete-2026-08-01_000000', 1 ),
+			)
+		);
+
+		$retention = new Retention( $storage, 0 );
+		$deleted   = $retention->prune( 3, self::NOW );
+
+		// Only the folder with a known, old mtime goes.
+		$this->assertSame( array( '.incomplete-2026-08-01_000000' ), $deleted );
+		$this->assertSame( array( 6 ), $storage->deletedFolders );
+		$this->assertSame( 0, $retention->incompleteFolders()[3]['modified'] );
 	}
 }

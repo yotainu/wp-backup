@@ -32,7 +32,10 @@ final class Manifest {
 	 *   warnings       string[]
 	 *   excludes       string[]
 	 *
+	 * Invalid UTF-8 bytes (e.g. in file paths) are replaced with U+FFFD.
+	 *
 	 * @param array $job Job summary, see above.
+	 * @throws \RuntimeException If the manifest cannot be encoded.
 	 */
 	public static function build( array $job ): string {
 		$database = isset( $job['database'] ) && is_array( $job['database'] ) ? $job['database'] : array();
@@ -61,7 +64,12 @@ final class Manifest {
 			'excludes'       => array_values( array_map( 'strval', (array) ( $job['excludes'] ?? array() ) ) ),
 		);
 
-		return (string) json_encode( $manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
+		$json = json_encode( $manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE );
+		if ( false === $json ) {
+			throw new \RuntimeException( 'manifest encoding failed: ' . json_last_error_msg() );
+		}
+
+		return $json;
 	}
 
 	/**

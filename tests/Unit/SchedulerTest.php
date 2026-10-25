@@ -136,6 +136,8 @@ final class SchedulerTest extends TestCase {
 		$this->assertFalse( Scheduler::isStale( $now - 13 * 86400, 'weekly', $now ) );
 		$this->assertFalse( Scheduler::isStale( $now - 14 * 86400, 'weekly', $now ) );
 		$this->assertFalse( Scheduler::isStale( null, 'weekly', $now ) );
+		$this->assertFalse( Scheduler::isStale( 0, 'weekly', $now ) );
+		$this->assertFalse( Scheduler::isStale( 0, 'monthly', $now ) );
 		$this->assertTrue( Scheduler::isStale( $now - 3 * 86400, 'daily', $now ) );
 		$this->assertTrue( Scheduler::isStale( $now - 63 * 86400, 'monthly', $now ) );
 		$this->assertFalse( Scheduler::isStale( $now - 62 * 86400, 'monthly', $now ) );

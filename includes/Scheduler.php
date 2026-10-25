@@ -73,9 +73,11 @@ final class Scheduler {
 
 	/**
 	 * Whether the last successful backup is too old (more than two periods).
+	 *
+	 * Null or 0 (the Settings default) means "never succeeded", which is not stale.
 	 */
 	public static function isStale( ?int $lastSuccess, string $schedule, int $now ): bool {
-		if ( null === $lastSuccess ) {
+		if ( null === $lastSuccess || $lastSuccess <= 0 ) {
 			return false;
 		}
 
