@@ -119,4 +119,25 @@ final class JobStateTest extends TestCase {
 		$this->assertTrue( $second->acquireLock( $lockFile ) );
 		$second->releaseLock();
 	}
+	public function test_failed_write_removes_the_temp_file_and_keeps_the_old_state(): void {
+		if ( ! is_writable( '/dev/full' ) || ! function_exists( 'symlink' ) ) {
+			$this->markTestSkipped( '/dev/full is not available.' );
+		}
+
+		$file  = $this->dir . '/job.json';
+		$state = JobState::create( $file, array( 'step' => 'scan' ) );
+		// Every write to the temp file fails with "no space left on device".
+		symlink( '/dev/full', $file . '.tmp' );
+
+		$state->set( 'step', 'zip' );
+		try {
+			$state->save();
+			$this->fail( 'save() did not throw' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'Could not write job state', $e->getMessage() );
+		}
+
+		$this->assertFalse( is_link( $file . '.tmp' ) || file_exists( $file . '.tmp' ), 'the temp file is removed' );
+		$this->assertSame( 'scan', JobState::load( $file )->get( 'step' ), 'the saved state is untouched' );
+	}
 }

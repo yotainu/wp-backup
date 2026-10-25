@@ -98,7 +98,10 @@ class JobState {
 			throw new \RuntimeException( 'Could not encode job state.' );
 		}
 
-		if ( false === @file_put_contents( $tmp, $json, LOCK_EX ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		$written = @file_put_contents( $tmp, $json, LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		if ( strlen( $json ) !== $written ) {
+			// Do not leave a partial temp file behind (it holds job details and wastes space).
+			@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 			throw new \RuntimeException( 'Could not write job state: ' . $tmp );
 		}
 
