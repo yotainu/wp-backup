@@ -95,7 +95,8 @@ class JobState {
 		$json = json_encode( $this->data, self::JSON_FLAGS );
 
 		if ( false === $json ) {
-			throw new \RuntimeException( 'Could not encode job state.' );
+			// No JSON_INVALID_UTF8_SUBSTITUTE: a silently altered cursor is worse than a failed save.
+			throw new \RuntimeException( 'Could not encode job state: ' . json_last_error_msg() );
 		}
 
 		$written = @file_put_contents( $tmp, $json, LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged

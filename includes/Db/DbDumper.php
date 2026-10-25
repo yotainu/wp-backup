@@ -122,7 +122,8 @@ class DbDumper {
 	 * Keys: tables, table_index, offset, phase ('dump'|'compress'|'done'),
 	 * compress_offset, rows, columns, pk, types, page (rows per SELECT of the
 	 * current table), last_key (primary key values of the last dumped row of the
-	 * current table, null before the first page), sql_bytes (bytes written to
+	 * current table, each base64 encoded so binary keys survive JSON; null before
+	 * the first page), sql_bytes (bytes written to
 	 * the SQL file), gz_bytes (bytes of the gzip file after the last run).
 	 * On resume, output files are truncated back to these sizes.
 	 */
@@ -182,7 +183,8 @@ class DbDumper {
 						if ( ! isset( $last[ $column ] ) ) {
 							throw new \RuntimeException( 'Primary key column missing in the result of ' . $table );
 						}
-						$key[] = (string) $last[ $column ];
+						// Raw bytes of a BINARY key (or a latin1 string) would make the state unencodable as JSON.
+						$key[] = base64_encode( (string) $last[ $column ] );
 					}
 					$this->state['last_key'] = $key;
 				}
@@ -374,13 +376,17 @@ class DbDumper {
 	 * "`a` > 1" or "(`a`, `b`) > (1, 'x')": rows after the last dumped key, in ORDER BY pk order.
 	 *
 	 * @param string[] $pk  Primary key columns.
-	 * @param string[] $key Values of those columns in the last dumped row.
+	 * @param string[] $key Base64 encoded values of those columns in the last dumped row.
 	 */
 	private function keyCondition( array $pk, array $key ): string {
 		$columns = array_map( array( $this, 'ident' ), $pk );
 		$values  = array();
 		foreach ( array_values( $pk ) as $i => $column ) {
-			$values[] = $this->literal( $key[ $i ], $this->state['types'][ $column ] ?? 'string' );
+			$value = base64_decode( (string) $key[ $i ], true );
+			if ( false === $value ) {
+				throw new \RuntimeException( 'Invalid key cursor in the dump state.' );
+			}
+			$values[] = $this->literal( $value, $this->state['types'][ $column ] ?? 'string' );
 		}
 
 		if ( 1 === count( $pk ) ) {

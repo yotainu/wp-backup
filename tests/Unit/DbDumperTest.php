@@ -341,7 +341,7 @@ final class DbDumperTest extends TestCase {
 		$this->assertTrue( $resumed->dump( $this->noLimit() ) );
 
 		// The resumed run continues after the last dumped key and does not re-read the table's metadata.
-		$this->assertSame( array( '2' ), $state['last_key'] );
+		$this->assertSame( array( base64_encode( '2' ) ), $state['last_key'] );
 		$this->assertSame( 'SELECT * FROM `wp_things` WHERE `id` > 2 ORDER BY `id` LIMIT 2', $wpdb2->queries[0] );
 		$this->assertNotContains( 'SHOW CREATE TABLE `wp_things`', $wpdb2->queries );
 	}
@@ -636,7 +636,7 @@ final class DbDumperTest extends TestCase {
 		$wpdb   = new FakeWpdb( array( 'wp_things' => $this->simpleTable( $this->evenRows() ) ) );
 		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), array(), 3 );
 		$this->assertFalse( $dumper->dump( $this->stopNow() ) );
-		$this->assertSame( array( '6' ), $dumper->state()['last_key'] );
+		$this->assertSame( array( base64_encode( '6' ) ), $dumper->state()['last_key'] );
 
 		$change( $wpdb );
 
@@ -737,6 +737,107 @@ final class DbDumperTest extends TestCase {
 		$sql = (string) file_get_contents( $this->sqlFile() );
 		$this->assertSame( 1, substr_count( $sql, "('o\\'b', 2)" ) );
 		$this->assertSame( 1, substr_count( $sql, "('z', 2)" ) );
+	}
+
+	public function test_binary_primary_keys_survive_the_state_round_trip(): void {
+		$keys  = array( "\x00\x01" . str_repeat( "\xff", 14 ), "\x7f" . str_repeat( "\xfe", 15 ), str_repeat( "\xff", 16 ) );
+		$rows  = array();
+		foreach ( $keys as $i => $key ) {
+			$rows[] = array(
+				'hash' => $key,
+				'n'    => (string) ( 10 + $i ),
+			);
+		}
+		$table = array(
+			'create'  => 'CREATE TABLE `wp_filemods` (...)',
+			'columns' => array(
+				array(
+					'Field' => 'hash',
+					'Type'  => 'binary(16)',
+					'Key'   => 'PRI',
+				),
+				array(
+					'Field' => 'n',
+					'Type'  => 'int(11)',
+					'Key'   => '',
+				),
+			),
+			'rows'    => $rows,
+		);
+		$wpdb  = new FakeWpdb( array( 'wp_filemods' => $table ) );
+
+		$state = array();
+		$runs  = 0;
+		do {
+			$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), $state, 2 );
+			$done   = $dumper->dump( $this->stopNow() );
+			$json   = json_encode( $dumper->state() );
+			$this->assertNotFalse( $json, 'the state is valid JSON: ' . json_last_error_msg() );
+			$state = json_decode( $json, true );
+			++$runs;
+		} while ( ! $done && $runs < 10 );
+
+		$this->assertTrue( $done );
+		$this->assertContains( 'SELECT * FROM `wp_filemods` WHERE `hash` > 0x7f' . str_repeat( 'fe', 15 ) . ' ORDER BY `hash` LIMIT 2', $wpdb->queries );
+		$this->assertSame( 3, $state['rows'] );
+		$sql = (string) file_get_contents( $this->sqlFile() );
+		foreach ( $keys as $i => $key ) {
+			$this->assertSame( 1, substr_count( $sql, '(0x' . bin2hex( $key ) . ', ' . ( 10 + $i ) . ')' ), "row $i dumped exactly once" );
+		}
+	}
+
+	public function test_numeric_and_string_keys_keep_their_literals_after_encoding(): void {
+		$rows = array();
+		foreach ( array( 'é', 'ü' ) as $name ) {
+			for ( $i = 9; $i <= 10; $i++ ) {
+				$rows[] = array(
+					'grp' => $name,
+					'n'   => (string) $i,
+				);
+			}
+		}
+		$table = array(
+			'create'  => 'CREATE TABLE `wp_meta` (...)',
+			'columns' => array(
+				array(
+					'Field' => 'grp',
+					'Type'  => 'varchar(20)',
+					'Key'   => 'PRI',
+				),
+				array(
+					'Field' => 'n',
+					'Type'  => 'bigint(20)',
+					'Key'   => 'PRI',
+				),
+			),
+			'rows'    => $rows,
+		);
+		$wpdb  = new FakeWpdb( array( 'wp_meta' => $table ) );
+
+		$state = array();
+		do {
+			$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), $state, 1 );
+			$done   = $dumper->dump( $this->stopNow() );
+			$state  = json_decode( (string) json_encode( $dumper->state() ), true );
+		} while ( ! $done );
+
+		// Numbers stay unquoted (numeric comparison: 10 after 9), strings quoted.
+		$this->assertContains( "SELECT * FROM `wp_meta` WHERE (`grp`, `n`) > ('é', 9) ORDER BY `grp`, `n` LIMIT 1", $wpdb->queries );
+		$this->assertContains( "SELECT * FROM `wp_meta` WHERE (`grp`, `n`) > ('é', 10) ORDER BY `grp`, `n` LIMIT 1", $wpdb->queries );
+		$this->assertSame( 4, $state['rows'] );
+	}
+
+	public function test_a_corrupted_key_cursor_is_refused(): void {
+		$wpdb   = new FakeWpdb( array( 'wp_things' => $this->simpleTable( $this->evenRows() ) ) );
+		$dumper = new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), array(), 3 );
+		$this->assertFalse( $dumper->dump( $this->stopNow() ) );
+
+		$state             = $dumper->state();
+		$state['last_key'] = array( '***' );
+
+		$this->expectException( \RuntimeException::class );
+		$this->expectExceptionMessage( 'Invalid key cursor in the dump state.' );
+		( new DbDumper( $wpdb, $this->sqlFile(), $this->gzFile(), $state, 3 ) )->dump( $this->noLimit() );
 	}
 
 	public function test_state_saved_before_keyset_paging_resumes_with_its_offset(): void {
