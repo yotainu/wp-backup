@@ -88,6 +88,16 @@ final class PluginTest extends TestCase {
 		$this->assertSame( array( 'PHP 7.4', 'zlib' ), Plugin::missingRequirements( $loaded, 70319 ) );
 	}
 
+	public function test_32_bit_php_is_reported(): void {
+		$loaded = static function (): bool {
+			return true;
+		};
+
+		$this->assertSame( array( '64-bit PHP' ), Plugin::missingRequirements( $loaded, 80200, 4 ) );
+		$this->assertSame( array( 'PHP 7.4', '64-bit PHP' ), Plugin::missingRequirements( $loaded, 70300, 4 ) );
+		$this->assertSame( array(), Plugin::missingRequirements( $loaded, 80200, 8 ) );
+	}
+
 	public function test_default_arguments_use_the_running_environment(): void {
 		// The test environment (PHP >= 7.4 with zlib, curl and openssl) must satisfy the requirements.
 		$this->assertSame( array(), Plugin::missingRequirements() );

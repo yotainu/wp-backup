@@ -148,14 +148,19 @@ final class Plugin {
 	 *
 	 * @param callable|null $extensionLoaded Seam for extension_loaded(); receives the extension name.
 	 * @param int           $phpVersionId    PHP_VERSION_ID of the running interpreter.
-	 * @return string[] Human readable names: "PHP 7.4" and/or missing extension names. Empty when all is fine.
+	 * @param int           $intSize         PHP_INT_SIZE of the running interpreter (ZIP64 offsets need pack('P')).
+	 * @return string[] Human readable names: "PHP 7.4", "64-bit PHP" and/or missing extension names. Empty when all is fine.
 	 */
-	public static function missingRequirements( ?callable $extensionLoaded = null, int $phpVersionId = PHP_VERSION_ID ): array {
+	public static function missingRequirements( ?callable $extensionLoaded = null, int $phpVersionId = PHP_VERSION_ID, int $intSize = PHP_INT_SIZE ): array {
 		$extensionLoaded = $extensionLoaded ?? 'extension_loaded';
 		$missing         = array();
 
 		if ( $phpVersionId < 70400 ) {
 			$missing[] = 'PHP 7.4';
+		}
+
+		if ( 8 !== $intSize ) {
+			$missing[] = '64-bit PHP';
 		}
 
 		foreach ( array( 'zlib', 'curl', 'openssl' ) as $extension ) {
