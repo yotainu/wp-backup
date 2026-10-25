@@ -323,6 +323,16 @@ final class JobRunnerTest extends TestCase {
 		return $this->workDir->path( 'state.json' );
 	}
 
+	/**
+	 * Path of a local job file of the current job: {file_prefix}-{name}.
+	 */
+	private function jobFile( string $name ): string {
+		$prefix = $this->readState()['file_prefix'];
+		$this->assertMatchesRegularExpression( '/^[a-z0-9]{8}$/', $prefix );
+
+		return $this->workDir->path( $prefix . '-' . $name );
+	}
+
 	private function readState(): array {
 		return json_decode( (string) file_get_contents( $this->stateFile() ), true );
 	}
@@ -397,8 +407,8 @@ final class JobRunnerTest extends TestCase {
 	 *
 	 * @return string[]
 	 */
-	private function leftoverJobFiles(): array {
-		return array_values( array_diff( scandir( $this->workDir->path() ), array( '.', '..', '.htaccess', 'index.php', 'runner.lock' ) ) );
+	private function leftoverJobFiles( array $ignore = array() ): array {
+		return array_values( array_diff( scandir( $this->workDir->path() ), array_merge( array( '.', '..', '.htaccess', 'index.php', 'runner.lock' ), $ignore ) ) );
 	}
 
 	/**
@@ -684,7 +694,7 @@ final class JobRunnerTest extends TestCase {
 		$this->assertLessThan( $status['files_total'], $status['files_done'], 'zip has not reached the end of the list' );
 
 		// The last listed file cannot have been zipped yet.
-		$lines   = file( $this->workDir->path( 'filelist.jsonl' ), FILE_IGNORE_NEW_LINES );
+		$lines   = file( $this->jobFile( 'filelist.jsonl' ), FILE_IGNORE_NEW_LINES );
 		$removed = json_decode( end( $lines ), true )['p'];
 		unlink( $this->site . '/' . $removed );
 
@@ -912,7 +922,7 @@ final class JobRunnerTest extends TestCase {
 		// Pretend the last run died while writing an entry: junk after the entry start,
 		// saved in the state with in_progress_offset pointing at the entry start.
 		$parts = $state['parts'];
-		$path  = $this->workDir->path( sprintf( 'files.zip.%03d', $parts['current_index'] ) );
+		$path  = $this->jobFile( sprintf( 'files.zip.%03d', $parts['current_index'] ) );
 		file_put_contents( $path, random_bytes( $junk ), FILE_APPEND );
 		$state['zip']['in_progress_offset'] = $parts['offset'];
 		$state['parts']['current_size']    += $junk;
@@ -939,7 +949,7 @@ final class JobRunnerTest extends TestCase {
 		$this->assertSame( 'scan', $state['step'], 'scan spans several runs' );
 
 		// A run appended a line and died before saving the state.
-		$list = $this->workDir->path( 'filelist.jsonl' );
+		$list = $this->jobFile( 'filelist.jsonl' );
 		file_put_contents( $list, '{"p":"empty.txt","s":0,"m":0}' . "\n", FILE_APPEND );
 		$this->assertGreaterThan( $state['scan_bytes'], filesize( $list ) );
 
@@ -995,7 +1005,7 @@ final class JobRunnerTest extends TestCase {
 		}
 		$state = $this->readState();
 		$this->assertSame( 'zip', $state['step'] );
-		$this->assertFileDoesNotExist( $this->workDir->path( 'database.sql' ) );
+		$this->assertFileDoesNotExist( $this->jobFile( 'database.sql' ) );
 
 		$state['step']                  = 'compress';
 		$state['db']['phase']           = 'compress';
@@ -1020,7 +1030,7 @@ final class JobRunnerTest extends TestCase {
 		$runner = $this->runner();
 		$runner->startJob( 'manual' );
 		$this->rewindToCompressWithoutSql( $runner );
-		file_put_contents( $this->workDir->path( 'database.sql.gz' ), gzencode( "-- WP pCloud Backup SQL dump\n" ) );
+		file_put_contents( $this->jobFile( 'database.sql.gz' ), gzencode( "-- WP pCloud Backup SQL dump\n" ) );
 
 		$this->runToEnd( $runner );
 
@@ -1367,7 +1377,7 @@ final class JobRunnerTest extends TestCase {
 		$this->assertSame( 'zip', $state['step'] );
 
 		// The last listed line is gone (e.g. lost on a full disk); scan_lines still counts it.
-		$list  = $this->workDir->path( 'filelist.jsonl' );
+		$list  = $this->jobFile( 'filelist.jsonl' );
 		$lines = file( $list );
 		array_pop( $lines );
 		file_put_contents( $list, implode( '', $lines ) );
@@ -1379,5 +1389,61 @@ final class JobRunnerTest extends TestCase {
 		$this->assertSame( 'failed', $history[0]['result'] );
 		$this->assertSame( sprintf( 'The file list ended after %d of %d lines.', count( $lines ), $state['scan_lines'] ), $history[0]['message'] );
 		$this->assertSame( array(), $this->remoteFolders(), 'no generation without every listed file' );
+	}
+	public function test_local_job_files_carry_a_random_prefix_and_remote_names_do_not(): void {
+		$dir = $this->workDir->ensure();
+		// Leftovers of a job run by the previous version (fixed names) and of another prefix.
+		foreach ( array( 'filelist.jsonl', 'files.zip.001', 'database.sql.gz', 'central.bin', 'zz00yy11-files.zip.003', 'zz00yy11-database.sql' ) as $name ) {
+			file_put_contents( $dir . '/' . $name, 'old' );
+		}
+		file_put_contents( $dir . '/unrelated.txt', 'kept' );
+
+		$uploads = array();
+		$storage = $this->decoratedStorage(
+			function ( string $name ) use ( &$uploads ) {
+				$uploads[] = $name;
+			}
+		);
+		$runner  = $this->runner( $storage );
+		$runner->startJob( 'manual' );
+		$this->assertSame( array( 'unrelated.txt' ), $this->leftoverJobFiles( array( 'state.json' ) ), 'old job files are removed when a job starts' );
+
+		$seen = array();
+		$this->runToEnd(
+			$runner,
+			function ( array $status ) use ( &$seen ) {
+				if ( $status['running'] ) {
+					$seen = array_merge( $seen, $this->leftoverJobFiles( array( 'state.json', 'unrelated.txt' ) ) );
+				}
+			}
+		);
+
+		$prefixes = array_unique(
+			array_map(
+				static function ( string $name ): string {
+					return substr( $name, 0, 9 );
+				},
+				$seen
+			)
+		);
+		$this->assertCount( 1, $prefixes, 'every local job file has the same prefix' );
+		$this->assertMatchesRegularExpression( '/^[a-z0-9]{8}-$/', reset( $prefixes ) );
+		$this->assertContains( reset( $prefixes ) . 'filelist.jsonl', $seen );
+		$this->assertContains( reset( $prefixes ) . 'files.zip.001', $seen );
+
+		foreach ( $uploads as $name ) {
+			$this->assertMatchesRegularExpression( '/^(files\.zip\.\d{3}|database\.sql\.gz|manifest\.json)$/', $name );
+		}
+		$generation = $this->onlyGeneration();
+		$manifest   = json_decode( (string) file_get_contents( $generation . '/manifest.json' ), true );
+		$this->assertSame( 'files.zip.001', $manifest['parts'][0]['name'] );
+		$this->assertArchiveMatches( $generation, $this->files );
+		$this->assertSame( array( 'unrelated.txt' ), $this->leftoverJobFiles() );
+
+		// The next job draws a new prefix.
+		$first = reset( $prefixes );
+		$runner->startJob( 'manual' );
+		$runner->run();
+		$this->assertNotSame( $first, $this->readState()['file_prefix'] . '-' );
 	}
 }

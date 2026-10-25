@@ -52,6 +52,8 @@ use WpPcloudBackup\Zip\ZipWriter;
  *   return_to          string   Step to continue with once no part is pending ('zip' | 'finalize').
  *   warnings           string[] Warnings found after the scan (the scan's own are in scanner.warnings).
  *   backup_root, excludes, part_size  Job inputs copied from the settings by prepare; read from here afterwards.
+ *   file_prefix        string   Random 8-character prefix of the local job files ({prefix}-filelist.jsonl,
+ *                               {prefix}-files.zip.NNN, ...), set by prepare. Remote names have no prefix.
  *   db_sha1, db_sha256, db_size  Hashes and size of database.sql.gz.
  *   db_uploaded, manifest_uploaded, renamed  bool  Idempotent finalize sub-steps.
  *   finished_at        int      Completion time used by the report.
@@ -84,6 +86,11 @@ final class JobRunner {
 	private const GZ_FILE       = 'database.sql.gz';
 	private const MANIFEST_FILE = 'manifest.json';
 	private const PARTS_BASE    = 'files.zip';
+
+	/**
+	 * Length of the random prefix of the local job files (spec 9).
+	 */
+	private const FILE_PREFIX_LENGTH = 8;
 
 	/**
 	 * Coarse progress at the start of each step.
@@ -741,7 +748,7 @@ final class JobRunner {
 	}
 
 	private function stepScan( callable $timeUp ): bool {
-		$list      = $this->file( self::LIST_FILE );
+		$list      = $this->jobFile( self::LIST_FILE );
 		$scanBytes = (int) $this->state->get( 'scan_bytes', 0 );
 
 		// Drop lines a crashed run appended after the last save.
@@ -777,7 +784,7 @@ final class JobRunner {
 	}
 
 	private function stepDump( callable $timeUp ): bool {
-		$dumper = new DbDumper( $this->wpdb, $this->file( self::SQL_FILE ), $this->file( self::GZ_FILE ), (array) $this->state->get( 'db', array() ) );
+		$dumper = new DbDumper( $this->wpdb, $this->jobFile( self::SQL_FILE ), $this->jobFile( self::GZ_FILE ), (array) $this->state->get( 'db', array() ) );
 		$done   = $dumper->dump( $timeUp );
 		$db     = $dumper->state();
 
@@ -798,8 +805,8 @@ final class JobRunner {
 	}
 
 	private function stepCompress( callable $timeUp ): bool {
-		$sql = $this->file( self::SQL_FILE );
-		$gz  = $this->file( self::GZ_FILE );
+		$sql = $this->jobFile( self::SQL_FILE );
+		$gz  = $this->jobFile( self::GZ_FILE );
 		$db  = (array) $this->state->get( 'db', array() );
 
 		// A previous run finished compressing (and removed the SQL file) but died before saving.
@@ -839,14 +846,14 @@ final class JobRunner {
 	 */
 	private function stepZip( callable $timeUp ): bool {
 		$sink = $this->partWriter();
-		$zip  = new ZipWriter( $sink, $this->file( self::CENTRAL_FILE ), (array) $this->state->get( 'zip', array() ) );
+		$zip  = new ZipWriter( $sink, $this->jobFile( self::CENTRAL_FILE ), (array) $this->state->get( 'zip', array() ) );
 
 		// The previous run died (or failed) in the middle of an entry.
 		if ( null !== $zip->entryStartOffset() ) {
 			$sink->truncateTo( $zip->entryStartOffset() );
 		}
 
-		$list   = $this->file( self::LIST_FILE );
+		$list   = $this->jobFile( self::LIST_FILE );
 		$handle = @fopen( $list, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 		if ( false === $handle ) {
 			throw new \RuntimeException( 'Cannot open the file list.' );
@@ -969,7 +976,7 @@ final class JobRunner {
 
 		if ( array() !== $pending ) {
 			$part = $pending[0];
-			$this->uploadVerified( (string) $part['path'], (string) $part['name'], (string) $part['sha1'] );
+			$this->uploadVerified( (string) $part['path'], self::remotePartName( $part ), (string) $part['sha1'] );
 
 			$sink->markUploaded( (int) $part['index'] );
 			$this->state->set( 'parts', $sink->state() );
@@ -992,7 +999,7 @@ final class JobRunner {
 	 */
 	private function stepFinalize(): bool {
 		$incompleteId = (int) $this->state->get( 'incomplete_id' );
-		$gz           = $this->file( self::GZ_FILE );
+		$gz           = $this->jobFile( self::GZ_FILE );
 
 		if ( null === $this->state->get( 'db_sha1' ) ) {
 			$sha1   = is_file( $gz ) ? sha1_file( $gz ) : false;
@@ -1027,7 +1034,7 @@ final class JobRunner {
 				return true;
 			}
 
-			$path = $this->file( self::MANIFEST_FILE );
+			$path = $this->jobFile( self::MANIFEST_FILE );
 			if ( strlen( $json ) !== file_put_contents( $path, $json ) ) {
 				throw new \RuntimeException( 'Cannot write manifest.json.' );
 			}
@@ -1217,7 +1224,7 @@ final class JobRunner {
 			'parts'          => array_map(
 				static function ( array $part ): array {
 					return array(
-						'name'   => (string) $part['name'],
+						'name'   => self::remotePartName( $part ),
 						'size'   => (int) $part['size'],
 						'sha1'   => (string) $part['sha1'],
 						'sha256' => (string) $part['sha256'],
@@ -1305,10 +1312,16 @@ final class JobRunner {
 			return;
 		}
 
-		$files = glob( $dir . '/' . self::PARTS_BASE . '.*' );
-		foreach ( array( self::LIST_FILE, self::CENTRAL_FILE, self::SQL_FILE, self::GZ_FILE, self::MANIFEST_FILE, self::STATE_FILE . '.tmp', self::STATE_FILE ) as $name ) {
-			$files[] = $dir . '/' . $name;
+		// Any job's prefixed files ("????????-name"), and the fixed names used before the prefix existed.
+		$any   = str_repeat( '?', self::FILE_PREFIX_LENGTH ) . '-';
+		$files = array();
+		foreach ( array( self::PARTS_BASE . '.*', self::LIST_FILE, self::CENTRAL_FILE, self::SQL_FILE, self::GZ_FILE, self::MANIFEST_FILE ) as $pattern ) {
+			foreach ( array( $any . $pattern, $pattern ) as $glob ) {
+				$files = array_merge( $files, glob( $dir . '/' . $glob ) ?: array() );
+			}
 		}
+		$files[] = $dir . '/' . self::STATE_FILE . '.tmp';
+		$files[] = $dir . '/' . self::STATE_FILE;
 		foreach ( $files as $file ) {
 			if ( is_file( $file ) ) {
 				@unlink( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
@@ -1359,6 +1372,9 @@ final class JobRunner {
 	 * fallback for a state saved before the snapshot existed.
 	 */
 	private function snapshotInputs(): void {
+		if ( null === $this->state->get( 'file_prefix' ) ) {
+			$this->state->set( 'file_prefix', self::randomPrefix() );
+		}
 		if ( null !== $this->state->get( 'backup_root' ) ) {
 			return;
 		}
@@ -1394,7 +1410,41 @@ final class JobRunner {
 	}
 
 	private function partWriter(): PartWriter {
-		return new PartWriter( $this->workDir->path(), self::PARTS_BASE, $this->partSize(), (array) $this->state->get( 'parts', array() ) );
+		return new PartWriter( $this->workDir->path(), $this->localName( self::PARTS_BASE ), $this->partSize(), (array) $this->state->get( 'parts', array() ) );
+	}
+
+	/**
+	 * Remote name of an archive part: always files.zip.NNN, whatever the local prefix.
+	 */
+	private static function remotePartName( array $part ): string {
+		return sprintf( '%s.%03d', self::PARTS_BASE, (int) $part['index'] );
+	}
+
+	/**
+	 * Local name of a job file: {file_prefix}-{name} (spec 9), or the bare name for a job
+	 * started before the prefix existed.
+	 */
+	private function localName( string $name ): string {
+		$prefix = (string) $this->state->get( 'file_prefix', '' );
+
+		return '' === $prefix ? $name : $prefix . '-' . $name;
+	}
+
+	private function jobFile( string $name ): string {
+		return $this->file( $this->localName( $name ) );
+	}
+
+	/**
+	 * Eight random characters from [a-z0-9].
+	 */
+	private static function randomPrefix(): string {
+		$chars  = 'abcdefghijklmnopqrstuvwxyz0123456789';
+		$prefix = '';
+		for ( $i = 0; $i < self::FILE_PREFIX_LENGTH; $i++ ) {
+			$prefix .= $chars[ random_int( 0, strlen( $chars ) - 1 ) ];
+		}
+
+		return $prefix;
 	}
 
 	/**
