@@ -82,6 +82,35 @@ class WorkDir {
 	}
 
 	/**
+	 * Read-only view of the work directory for diagnostics: never creates or repairs anything.
+	 *
+	 * @return array{exists:bool,writable:bool,htaccess:bool,index:bool,state:bool}
+	 *         writable: the directory is writable, or (not created yet) the uploads directory is.
+	 */
+	public function inspect(): array {
+		$name = (string) $this->settings->get( 'workdir_name' );
+		$dir  = '' === $name ? '' : $this->uploadsBaseDir . '/' . $name;
+
+		if ( '' === $dir || ! is_dir( $dir ) ) {
+			return array(
+				'exists'   => false,
+				'writable' => is_dir( $this->uploadsBaseDir ) && is_writable( $this->uploadsBaseDir ),
+				'htaccess' => false,
+				'index'    => false,
+				'state'    => false,
+			);
+		}
+
+		return array(
+			'exists'   => true,
+			'writable' => is_writable( $dir ),
+			'htaccess' => is_file( $dir . '/.htaccess' ),
+			'index'    => is_file( $dir . '/index.php' ),
+			'state'    => is_file( $dir . '/state.json' ),
+		);
+	}
+
+	/**
 	 * Whether the web server honours .htaccess files.
 	 */
 	public function isWebServerApache(): bool {

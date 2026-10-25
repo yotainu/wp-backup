@@ -317,7 +317,9 @@ final class AdminPageTest extends TestCase {
 	public function test_diagnostics_reports_missing_extensions_and_disabled_cron(): void {
 		$this->uploads = TempDir::create();
 		$settings      = new ArrayBackedSettings();
-		$plugin        = $this->plugin( $settings, array( 'workDir' => new WorkDir( $settings, $this->uploads ) ) );
+		$workDir       = new WorkDir( $settings, $this->uploads );
+		$workDir->ensure(); // Created on activation.
+		$plugin        = $this->plugin( $settings, array( 'workDir' => $workDir ) );
 		$page          = $this->page( $plugin, array( 'missing' => array( 'zlib', 'curl' ), 'cronDisabled' => true ) );
 
 		$diag = $page->diagnostics();
@@ -328,10 +330,11 @@ final class AdminPageTest extends TestCase {
 		$this->assertSame( array( 'value' => true, 'ok' => false ), $diag['disable_wp_cron'] );
 		$this->assertTrue( $diag['workdir_writable']['ok'] );
 		$this->assertTrue( $diag['workdir_htaccess']['value'] );
+		$this->assertSame( array( 'value' => true, 'ok' => true ), $diag['workdir_index'] );
 		$this->assertFalse( $diag['incomplete_job']['value'] );
 		$this->assertSame( PHP_VERSION, $diag['php_version']['value'] );
 		$this->assertSame(
-			array( 'php_version', 'max_execution_time', 'memory_limit', 'ext_zlib', 'ext_curl', 'ext_openssl', 'workdir_writable', 'workdir_htaccess', 'server_apache', 'disable_wp_cron', 'free_bytes', 'incomplete_job' ),
+			array( 'php_version', 'max_execution_time', 'memory_limit', 'ext_zlib', 'ext_curl', 'ext_openssl', 'workdir_writable', 'workdir_htaccess', 'workdir_index', 'server_apache', 'disable_wp_cron', 'free_bytes', 'incomplete_job' ),
 			array_keys( $diag )
 		);
 	}
@@ -347,6 +350,31 @@ final class AdminPageTest extends TestCase {
 		$this->assertTrue( $diag['incomplete_job']['value'] );
 		$this->assertFalse( $diag['disable_wp_cron']['value'] );
 		$this->assertTrue( $diag['disable_wp_cron']['ok'] );
+	}
+
+	public function test_diagnostics_have_no_side_effects_on_the_work_directory(): void {
+		$this->uploads = TempDir::create();
+		$settings      = new ArrayBackedSettings();
+		$workDir       = new WorkDir( $settings, $this->uploads );
+		$page          = $this->page( $this->plugin( $settings, array( 'workDir' => $workDir ) ) );
+
+		// Not created yet: nothing is created, the uploads folder decides writability.
+		$diag = $page->diagnostics();
+		$this->assertSame( '', $settings->values['workdir_name'] );
+		$this->assertSame( array( '.', '..' ), scandir( $this->uploads ) );
+		$this->assertTrue( $diag['workdir_writable']['value'] );
+		$this->assertSame( array( 'value' => false, 'ok' => false ), $diag['workdir_htaccess'] );
+		$this->assertSame( array( 'value' => false, 'ok' => false ), $diag['workdir_index'] );
+
+		// Protection files removed: reported, not silently recreated.
+		$dir = $workDir->ensure();
+		unlink( $dir . '/.htaccess' );
+		unlink( $dir . '/index.php' );
+		$diag = $page->diagnostics();
+		$this->assertFalse( $diag['workdir_htaccess']['value'] );
+		$this->assertFalse( $diag['workdir_index']['value'] );
+		$this->assertFileDoesNotExist( $dir . '/.htaccess' );
+		$this->assertFileDoesNotExist( $dir . '/index.php' );
 	}
 
 	// === save_settings ===

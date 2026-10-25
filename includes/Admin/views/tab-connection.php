@@ -20,6 +20,7 @@ $wppb_rows = array(
 	'ext_openssl'        => __( 'openssl 拡張（AES-256-GCM）', 'wp-pcloud-backup' ),
 	'workdir_writable'   => __( '作業フォルダへの書き込み', 'wp-pcloud-backup' ),
 	'workdir_htaccess'   => __( '作業フォルダの .htaccess', 'wp-pcloud-backup' ),
+	'workdir_index'      => __( '作業フォルダの index.php', 'wp-pcloud-backup' ),
 	'server_apache'      => __( 'Apache 系サーバー', 'wp-pcloud-backup' ),
 	'disable_wp_cron'    => __( 'DISABLE_WP_CRON', 'wp-pcloud-backup' ),
 	'free_bytes'         => __( 'ディスク空き容量', 'wp-pcloud-backup' ),
@@ -31,6 +32,7 @@ $wppb_text = static function ( string $key, $value ) use ( $wppb_yes ): string {
 		case 'ext_curl':
 		case 'ext_openssl':
 		case 'workdir_htaccess':
+		case 'workdir_index':
 			return $wppb_yes( (bool) $value, __( 'あり', 'wp-pcloud-backup' ), __( 'なし', 'wp-pcloud-backup' ) );
 		case 'workdir_writable':
 			return $wppb_yes( (bool) $value, __( '可', 'wp-pcloud-backup' ), __( '不可', 'wp-pcloud-backup' ) );

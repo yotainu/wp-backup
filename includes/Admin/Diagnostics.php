@@ -44,18 +44,13 @@ final class Diagnostics {
 	 * @return array<string,array{value:mixed,ok:?bool}>
 	 */
 	public function all(): array {
-		$dir  = null;
-		$free = null;
-		try {
-			$dir  = $this->workDir->ensure();
-			$free = $this->workDir->freeBytes();
-		} catch ( \Throwable $e ) {
-			unset( $e );
-		}
-
-		$writable   = null !== $dir && is_dir( $dir ) && is_writable( $dir );
-		$htaccess   = null !== $dir && is_file( $dir . '/.htaccess' );
-		$incomplete = null !== $dir && is_file( $dir . '/state.json' );
+		// Read-only: a GET of the admin page must not create or repair the work directory.
+		$work       = $this->workDir->inspect();
+		$free       = $this->workDir->freeBytes();
+		$writable   = $work['writable'];
+		$htaccess   = $work['htaccess'];
+		$index      = $work['index'];
+		$incomplete = $work['state'];
 		$apache     = $this->workDir->isWebServerApache();
 		$zlib       = (bool) ( $this->hasExtension )( 'zlib' );
 		$curl       = (bool) ( $this->hasExtension )( 'curl' );
@@ -70,6 +65,7 @@ final class Diagnostics {
 			'ext_openssl'        => $this->entry( $openssl, $openssl ),
 			'workdir_writable'   => $this->entry( $writable, $writable ),
 			'workdir_htaccess'   => $this->entry( $htaccess, $htaccess ),
+			'workdir_index'      => $this->entry( $index, $index ),
 			'server_apache'      => $this->entry( $apache, $apache ),
 			'disable_wp_cron'    => $this->entry( $this->cronDisabled, ! $this->cronDisabled ),
 			'free_bytes'         => $this->entry( $free, null === $free ? null : $free >= self::MIN_FREE_BYTES ),
