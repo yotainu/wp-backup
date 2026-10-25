@@ -465,6 +465,20 @@ final class JobRunnerTest extends TestCase {
 		};
 	}
 
+	/**
+	 * Storage whose part uploads take a minute of the test clock, so a run stops after one part
+	 * even when the clock does not tick on its own.
+	 */
+	private function slowPartStorage(): StorageInterface {
+		return $this->decoratedStorage(
+			function ( string $name ) {
+				if ( 0 === strpos( $name, 'files.zip.' ) ) {
+					$this->now += 60;
+				}
+			}
+		);
+	}
+
 	// ------------------------------------------------------------------
 	// Tests.
 	// ------------------------------------------------------------------
@@ -577,6 +591,26 @@ final class JobRunnerTest extends TestCase {
 		$generations = glob( $this->siteRemote() . '/2*', GLOB_ONLYDIR );
 		$this->assertCount( 2, $generations );
 		$this->assertArchiveMatches( end( $generations ), $this->files );
+	}
+
+	public function test_one_run_keeps_zipping_and_uploading_while_the_budget_allows(): void {
+		$this->values['run_budget_sec'] = 100000;
+		$uploads                        = array();
+		$storage                        = $this->decoratedStorage(
+			function ( string $name ) use ( &$uploads ) {
+				if ( 0 === strpos( $name, 'files.zip.' ) ) {
+					$uploads[] = $name;
+				}
+			}
+		);
+		$runner = $this->runner( $storage );
+		$runner->startJob( 'manual' );
+
+		$status = $runner->run();
+
+		$this->assertGreaterThanOrEqual( 2, count( $uploads ), 'several parts are uploaded in a single run' );
+		$this->assertFalse( $status['running'], 'with enough budget the whole job finishes in one run' );
+		$this->assertArchiveMatches( $this->onlyGeneration(), $this->files );
 	}
 
 	public function test_each_run_respects_budget_except_upload(): void {
@@ -742,21 +776,24 @@ final class JobRunnerTest extends TestCase {
 	}
 
 	public function test_rapid_fire_guard(): void {
-		$runner = $this->runner();
+		$runner = $this->runner( $this->slowPartStorage() );
 		$runner->startJob( 'manual' );
 		$this->tick = 0;
 
+		$start = $this->now;
 		$runner->run();
 		$state = $this->readState();
-		$this->assertSame( $this->now, $state['last_run_started'] );
+		$this->assertSame( $start, $state['last_run_started'] );
 		$this->assertSame( $this->now, $state['last_run_finished'] );
 
-		// A finished run does not block the next one, even at the same time.
+		// A finished run does not block the next one, even right after it.
 		$runner->run();
 		$state = $this->readState();
+		$this->assertGreaterThan( $start, $state['last_run_started'] );
 
 		// Simulate a run that started now and died without finishing.
-		$state['last_run_finished'] = $state['last_run_started'] - 1;
+		$state['last_run_started']  = $this->now;
+		$state['last_run_finished'] = $this->now - 1;
 		$this->writeState( $state );
 		$before = file_get_contents( $this->stateFile() );
 
@@ -768,9 +805,10 @@ final class JobRunnerTest extends TestCase {
 		$this->assertSame( $before, file_get_contents( $this->stateFile() ), 'still inside budget x 3' );
 
 		$this->now += 1;
+		$start = $this->now;
 		$runner->run();
 		$this->assertNotSame( $before, file_get_contents( $this->stateFile() ), 'runs again after budget x 3' );
-		$this->assertSame( $this->now, $this->readState()['last_run_started'] );
+		$this->assertSame( $start, $this->readState()['last_run_started'] );
 	}
 
 	public function test_tick_on_fresh_install_sets_next_run_and_starts_nothing(): void {
@@ -791,9 +829,10 @@ final class JobRunnerTest extends TestCase {
 	public function test_tick_starts_job_when_due_and_sends_stale_notice(): void {
 		$tz         = new \DateTimeZone( 'Asia/Tokyo' );
 		$offset     = Scheduler::offsetMinutes( 'example.com' );
-		$runner     = $this->runner();
+		$runner     = $this->runner( $this->slowPartStorage() );
 		$this->tick = 0;
 
+		$start                          = $this->now;
 		$slot                           = $this->now - 60;
 		$this->values['next_run']       = $slot;
 		$this->values['last_success']   = $this->now - 4 * 86400;
@@ -805,13 +844,13 @@ final class JobRunnerTest extends TestCase {
 		$this->assertSame( 'schedule', $state['trigger'] );
 		$this->assertSame( $slot, $state['slot'] );
 		$this->assertSame( $slot, $this->values['last_scheduled'] );
-		$this->assertSame( Scheduler::nextRun( 'daily', '03:00', $offset, $slot, $this->now, $tz ), $this->values['next_run'] );
-		$this->assertGreaterThan( $this->now, $this->values['next_run'] );
+		$this->assertSame( Scheduler::nextRun( 'daily', '03:00', $offset, $slot, $start, $tz ), $this->values['next_run'] );
+		$this->assertGreaterThan( $start, $this->values['next_run'] );
 
 		$this->assertCount( 1, $this->mails );
 		$this->assertStringContainsString( '停止中', $this->mails[0][1] );
 		$this->assertStringContainsString( 'バックアップが周期の2倍以上成功していません', $this->mails[0][2] );
-		$this->assertSame( $this->now, $this->values['last_stale_notice'] );
+		$this->assertSame( $start, $this->values['last_stale_notice'] );
 
 		// Within 24 h: no second stale notice, and the running job is continued, not restarted.
 		$this->now += 3600;

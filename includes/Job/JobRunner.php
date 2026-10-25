@@ -445,7 +445,11 @@ final class JobRunner {
 	// ------------------------------------------------------------------
 
 	/**
-	 * Execute steps until the budget is used up, a step stops early, or an upload was sent.
+	 * Execute steps until the budget is used up or a step stops early.
+	 *
+	 * Step switches (zip -> upload -> zip, upload -> finalize) and further part uploads
+	 * happen inside the same run while time remains. An upload itself is never cut by
+	 * the budget, so a run sends at least one pending part and may overrun by one part.
 	 */
 	private function runSteps( callable $timeUp ): void {
 		while ( null !== $this->state ) {
@@ -458,7 +462,7 @@ final class JobRunner {
 				return;
 			}
 
-			if ( null === $this->state || 'upload' === $step || ! $completed || $timeUp() ) {
+			if ( null === $this->state || ! $completed || $timeUp() ) {
 				return;
 			}
 		}
@@ -779,7 +783,8 @@ final class JobRunner {
 	}
 
 	/**
-	 * Send the first pending part (one per run, regardless of the budget).
+	 * Send the first pending part, regardless of the budget. runSteps() calls this again
+	 * for the next part while the budget allows.
 	 */
 	private function stepUpload(): bool {
 		$sink    = new PartWriter( $this->workDir->path(), self::PARTS_BASE, $this->settings->partSizeBytes(), (array) $this->state->get( 'parts', array() ) );
