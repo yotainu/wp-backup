@@ -2,6 +2,19 @@
 
 WordPress サイトのファイルとデータベースを、定期的に pCloud へバックアップするプラグインです。共用サーバー（heteml、さくらのレンタルサーバーなど）でも最後まで走り切るよう、処理を小さなステップに分けて少しずつ進めます。
 
+## 目次
+
+- [概要](#概要)
+- [対応環境](#対応環境)
+- [導入手順](#導入手順)
+- [pCloud トークンの取得](#pcloud-トークンの取得)
+- [`wp-config.php` の定数一覧](#wp-configphp-の定数一覧)
+- [外部 cron の設定例](#外部-cron-の設定例)
+- [**復元手順**](#復元手順)（バックアップから戻すとき）
+- [セキュリティ上の注意](#セキュリティ上の注意)
+- [自動更新とリリース手順](#自動更新とリリース手順)
+- [開発](#開発)
+
 ## 概要
 
 - 対象は「サイトの公開ルート以下のすべてのファイル」と「データベースの全テーブル」です。
@@ -155,37 +168,54 @@ WP-Cron はサイトにアクセスがないと動きません。アクセスが
 
 ### 1. ファイルを復元する
 
-1. 分割された ZIP を1つに結合します。ダウンロードしたフォルダでターミナルを開いて実行します。
+1. 分割された ZIP を1つに結合します。ダウンロードしたフォルダでターミナルを開いて実行します。**パートは必ず番号の順（`.001`、`.002` …）に並べて結合してください。** 順番が違うと ZIP が壊れます。`files.zip` という名前のファイルが先にあると失敗するので、あれば削除またはリネームしてから行います。
 
-   - macOS / Linux:
+   - macOS / Linux（番号順を保証する、推奨の方法）:
+
+     ```
+     ls files.zip.* | sort -t. -k3,3n | xargs cat > files.zip
+     ```
+
+     パートが 1000 個以上あると、`files.zip.1000` のように桁が増えます。すると単純な `cat files.zip.*` は `.1000` を `.101` より前に並べてしまい、壊れた ZIP になります。1000 個以上になるのは、パートサイズが 10MB のサイトで合計 10GB 以上、25MB のサイトで 25GB 以上のときです。上のコマンドは番号を数値として並べるので、どちらの場合でも安全です。パートが 999 個以下のときに限り、次の簡単な書き方でも同じ結果になります。
 
      ```
      cat files.zip.* > files.zip
      ```
 
-   - Windows（PowerShell）:
+   - Windows（PowerShell。ダウンロードしたフォルダで開く）:
 
      ```
-     cmd /c copy /b files.zip.* files.zip
+     $out=[IO.File]::Create("$PWD\files.zip"); Get-ChildItem files.zip.[0-9]* | Sort-Object {[int]($_.Extension.TrimStart('.'))} | ForEach-Object { $i=[IO.File]::OpenRead($_.FullName); $i.CopyTo($out); $i.Close() }; $out.Close()
      ```
 
-   `files.zip.001` から順に結合される必要があります。`.001`、`.002` … と連番になっていることを確認してください（`.010` 以降があっても、数字の順に並びます）。
+     拡張子の数字を数値として並べて、1つの `files.zip` に書き出します。事前に `files.zip` が存在していると上書きされるので、別のファイルがあれば退避してください。（`copy /b files.zip.* files.zip` は並び順が保証されず、出力ファイル自身を巻き込むことがあるため使わないでください。）
 
 2. （任意）ダウンロードが壊れていないか確認します。`manifest.json` の `parts` に各パートの `sha256` が書いてあります。
 
-   ```
-   shasum -a 256 files.zip.001
-   ```
+   - macOS: `shasum -a 256 files.zip.001`
+   - Linux: `sha256sum files.zip.001`
+   - Windows（PowerShell）: `Get-FileHash -Algorithm SHA256 files.zip.001`
 
-   の出力が、`parts` の `files.zip.001` の `sha256` と一致すれば正常です（Linux では `sha256sum`、Windows の PowerShell では `Get-FileHash -Algorithm SHA256 files.zip.001`）。
+   出力が、`parts` の `files.zip.001` の `sha256` と一致すれば正常です（他のパートも同様に確認できます）。
 
 3. 展開します。
 
-   ```
-   unzip files.zip -d restored
-   ```
+   - macOS / Linux:
 
-   macOS では `files.zip` を Finder でダブルクリックしても展開できます。Windows でエクスプローラーから開けないときは 7-Zip を使ってください。
+     ```
+     unzip files.zip -d restored
+     ```
+
+     macOS では `files.zip` を Finder でダブルクリックしても展開できます。
+
+   - Windows 10 以降（PowerShell またはコマンドプロンプト）:
+
+     ```
+     mkdir restored
+     tar -xf files.zip -C restored
+     ```
+
+     `tar`（bsdtar）は Windows 10 以降に標準で入っています。代わりに [7-Zip](https://7-zip.org/) で `files.zip` を右クリック → 7-Zip → 展開、でも構いません。エクスプローラーのダブルクリックは ZIP64 形式で開けないことがあるので、この方法は避けてください。
 
 4. 展開してできた `restored` フォルダの**中身**を、サーバーの `manifest.json` の `backup_root` に記録されているフォルダへアップロードします（FTP、ファイルマネージャ、`rsync` など）。ZIP の最上位は `backup_root` にそのまま対応しているので、`restored` フォルダ自体ではなく、その中身を置いてください。`manifest.json` には `abspath`（バックアップ時の WordPress の設置パス）も記録されています。WordPress 本体をサブフォルダに置いているサイトでは、`backup_root` がその一つ上のフォルダになります。
 
@@ -198,6 +228,8 @@ WP-Cron はサイトにアクセスがないと動きません。アクセスが
    ```
 
    `database.sql` ができます（元のファイルを残したいときは `gunzip -k`）。
+
+   Windows では [7-Zip](https://7-zip.org/) で `database.sql.gz` を右クリック → 7-Zip → 展開、とすると `database.sql` ができます（`tar` は単独の `.gz` ファイルをうまく展開できないので、7-Zip を使ってください）。phpMyAdmin の「インポート」は `.gz` のまま受け付けることもありますが、展開してから流し込むほうが確実です。
 
 2. 次のどちらかで流し込みます。
 
@@ -228,6 +260,7 @@ WP-Cron はサイトにアクセスがないと動きません。アクセスが
 - トークンが漏れた疑いがあるときは、pCloud の My Apps で登録したアプリを削除してください。そのアプリから発行したトークンがすべて無効になります。その後、新しくアプリを登録して全サイトのトークンを入れ替えます。
 - **データベースのダンプにはパスワードのハッシュなどが含まれます。** pCloud 上のバックアップフォルダを他人に共有しないでください。
 - トークンは `AUTH_KEY` と `SECURE_AUTH_KEY` から作った鍵で暗号化して保存され、管理画面や通知メールには表示されません。
+- **`AUTH_KEY` / `SECURE_AUTH_KEY` を変更（ローテーション）すると、保存済みのトークンを復号できなくなります。** 鍵を変えたサイトでは、管理画面の「接続」タブでトークンを入れ直してください（`wp-config.php` の定数でトークンを設定しているサイトは影響を受けません）。
 - 作業フォルダ（`wp-content/uploads/wp-pcloud-backup-<ランダム16文字>/`）には `.htaccess` と空の `index.php` を置いて外部から見えないようにしています。**nginx は `.htaccess` を読まない**ので、nginx のサーバーでは `wp-content/uploads/wp-pcloud-backup-*/` へのアクセスを、サーバー設定で自分で拒否してください。
 - 外部 cron 用 URL の鍵が漏れた場合は、「接続」タブの「URL を再生成」で再発行し、cron の URL を更新してください。
 
@@ -248,13 +281,30 @@ WP-Cron はサイトにアクセスがないと動きません。アクセスが
 リリース:
 
 ```
-bin/release.sh 0.1.1 notes.md
+bin/release.sh 0.1.1 ../notes-0.1.1.md
 ```
 
-- 第1引数はバージョン（`X.Y.Z`）、第2引数は更新内容のメモファイルです（省略すると直前のコミット履歴から自動生成します）。
-- `--dry-run` を付けると、ファイルの書き換えと zip の作成までを行い、コミット・タグ・push・GitHub リリースは行いません。
-- 作業ツリーがクリーンでないとき、`gh` にログインしていないとき、`origin` が未設定または `OWNER` のままのときは、何も変更せずに中止します。
-- スクリプトは `wp-pcloud-backup.php` の `Version:` と `WP_PCLOUD_BACKUP_VERSION`、`readme.txt` の `Stable tag`、`update.json` の `version` / `download_url` / `sha256_url` を書き換え、`build/wp-pcloud-backup.zip`（最上位フォルダ名は `wp-pcloud-backup/`）と `build/wp-pcloud-backup.zip.sha256` を作ってから、コミット、タグ、push、`gh release create` を行います。
+- 第1引数はバージョン（`X.Y.Z`）、第2引数は更新内容のメモファイルです（省略すると直前のタグからのコミット履歴で自動生成します）。**メモファイルはリポジトリの外に置く（または `.gitignore` に入れる）**ようにしてください。リポジトリ内の未追跡ファイルがあると「作業ツリーがクリーンでない」として中止されます。
+- `--dry-run` を付けると、ファイルの書き換えと zip の作成までを行い、コミット・タグ・push・GitHub リリースは行いません。確認後は `git checkout -- . && rm -r build` で元に戻します。
+- `main` ブランチ以外からは中止します（意図して別ブランチから出すときだけ `--allow-branch` を付けます）。
+- 次のときは、何も変更せずに中止します: 作業ツリーがクリーンでない / バージョンの形式が `X.Y.Z` でない / タグがローカルまたは GitHub にすでにある / `gh` にログインしていない / `origin` が未設定または `OWNER` のまま / **`wp-pcloud-backup.php` に `OWNER` が残っている**（`--dry-run` のときは最後の2つを許容します）。
+- スクリプトは `wp-pcloud-backup.php` の `Version:` と `WP_PCLOUD_BACKUP_VERSION`、`readme.txt` の `Stable tag`、`update.json` の `version` / `download_url` / `sha256_url` / `changelog` を書き換え、`build/wp-pcloud-backup.zip`（最上位フォルダ名は `wp-pcloud-backup/`）と `build/wp-pcloud-backup.zip.sha256` を作ります。
+
+公開は次の順に行います。存在しない zip を指す `update.json` を先に公開しないため、`update.json` を含むブランチの push を最後にしています。
+
+1. `git commit`（`chore: release vX.Y.Z`）
+2. `git tag -a vX.Y.Z`
+3. `git push origin refs/tags/vX.Y.Z`（タグだけを push）
+4. `gh release create vX.Y.Z …`（zip と sha256 を添付）
+5. `git push origin HEAD`（ここで初めて `update.json` が公開され、各サイトの自動更新が始まる）
+
+途中で失敗したときは、スクリプトが手順ごとの復旧コマンドを表示します。目安は次のとおりです。
+
+| 失敗した手順 | 状態 | 復旧 |
+|---|---|---|
+| 2 または 3 | まだ何も公開されていない | `git tag -d vX.Y.Z && git reset --soft HEAD~1` で戻し、原因を直して再実行 |
+| 4 | タグだけ push 済み | `gh release create vX.Y.Z build/wp-pcloud-backup.zip build/wp-pcloud-backup.zip.sha256` をやり直す。やめるなら `git push origin :refs/tags/vX.Y.Z && git tag -d vX.Y.Z && git reset --soft HEAD~1` |
+| 5 | リリースは存在する | `git push origin HEAD` をやり直す |
 
 ## 開発
 

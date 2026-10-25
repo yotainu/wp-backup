@@ -41,7 +41,7 @@ In pCloud under `/WPBackup/<site folder>/YYYY-MM-DD_HHMMSS/`, as `manifest.json`
 
 = How do I restore? =
 
-Download the dated folder, join the parts (`cat files.zip.* > files.zip` on macOS and Linux), unzip, upload the files to the path recorded in `manifest.json`, then import `database.sql`. See the README for details.
+Download the dated folder, join the parts in numeric order (`ls files.zip.* | sort -t. -k3,3n | xargs cat > files.zip` on macOS and Linux), unzip, upload the files to the path recorded in `manifest.json`, run `gunzip database.sql.gz`, then import the resulting `database.sql`. See the README for details.
 
 = Is it safe to use one pCloud token on many sites? =
 

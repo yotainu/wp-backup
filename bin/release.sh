@@ -2,26 +2,33 @@
 #
 # Build and publish a release of WP pCloud Backup.
 #
-# Usage: bin/release.sh [--dry-run] X.Y.Z [notes-file]
+# Usage: bin/release.sh [--dry-run] [--allow-branch] X.Y.Z [notes-file]
 #
-#   --dry-run   Rewrite version strings and build build/wp-pcloud-backup.zip, but do not
-#               commit, tag, push or create the GitHub release. Revert with:
-#                 git checkout -- . && rm -rf build
+#   --dry-run       Rewrite version strings and build build/wp-pcloud-backup.zip, but do not
+#                   commit, tag, push or create the GitHub release. Revert with:
+#                     git checkout -- . && rm -r build
+#   --allow-branch  Allow releasing from a branch other than main.
 #
+# Keep notes-file outside the repository (or gitignored): an untracked file makes the tree "dirty".
 # Without notes-file the release notes are generated from the commit subjects since the previous tag.
+#
+# Publish order: commit, tag, push the tag, create the GitHub release, push the branch (update.json
+# goes live last, so no site is pointed at a release asset that does not exist yet).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 PLUGIN="wp-pcloud-backup"
 DRY_RUN=0
+ALLOW_BRANCH=0
 POSITIONAL=()
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
+    --allow-branch) ALLOW_BRANCH=1 ;;
     -h|--help)
-      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     -*)
@@ -33,7 +40,7 @@ for arg in "$@"; do
 done
 
 if [ "${#POSITIONAL[@]}" -lt 1 ] || [ "${#POSITIONAL[@]}" -gt 2 ]; then
-  echo "Usage: bin/release.sh [--dry-run] X.Y.Z [notes-file]" >&2
+  echo "Usage: bin/release.sh [--dry-run] [--allow-branch] X.Y.Z [notes-file]" >&2
   exit 1
 fi
 
@@ -60,6 +67,11 @@ if [ -n "$(git status --porcelain)" ]; then
   fail "Working tree is not clean. Commit or stash your changes first."
 fi
 
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$BRANCH" != "main" ] && [ "$ALLOW_BRANCH" -eq 0 ]; then
+  fail "Releases are made from main (current branch: ${BRANCH}). Use --allow-branch to override."
+fi
+
 if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   fail "Tag ${TAG} already exists."
 fi
@@ -84,9 +96,12 @@ else
   if [[ "$OWNER" == *OWNER* ]]; then
     fail "origin still contains the OWNER placeholder."
   fi
+  if [ -n "$(git ls-remote --tags origin "refs/tags/${TAG}")" ]; then
+    fail "Tag ${TAG} already exists on origin."
+  fi
 fi
 
-if [ "$DRY_RUN" -eq 0 ] && grep -q "OWNER" "${PLUGIN}.php"; then
+if [ "$DRY_RUN" -eq 0 ] && grep -q "/OWNER/" "${PLUGIN}.php"; then
   fail "${PLUGIN}.php still contains the OWNER placeholder (WP_PCLOUD_BACKUP_UPDATE_URL). Replace it and commit before releasing."
 fi
 
@@ -146,10 +161,13 @@ rsync -a --delete --exclude-from=.distignore ./ "build/${PLUGIN}/"
 shasum -a 256 "build/${PLUGIN}.zip" | awk '{print $1}' > "build/${PLUGIN}.zip.sha256"
 
 # The zip must have a single top-level folder named after the plugin.
-if unzip -Z1 "build/${PLUGIN}.zip" | grep -v "^${PLUGIN}/" | grep -q .; then
+# Capture the listing first: piping unzip into grep -q can end in SIGPIPE, which pipefail turns into a failure.
+ENTRIES="$(unzip -Z1 "build/${PLUGIN}.zip")"
+OUTSIDE="$(grep -v "^${PLUGIN}/" <<< "$ENTRIES" || true)"
+if [ -n "$OUTSIDE" ]; then
   fail "The zip contains entries outside ${PLUGIN}/."
 fi
-if ! unzip -Z1 "build/${PLUGIN}.zip" | grep -qx "${PLUGIN}/${PLUGIN}.php"; then
+if ! grep -qx "${PLUGIN}/${PLUGIN}.php" <<< "$ENTRIES"; then
   fail "The zip does not contain ${PLUGIN}/${PLUGIN}.php."
 fi
 
@@ -159,18 +177,57 @@ echo "sha256: $(cat "build/${PLUGIN}.zip.sha256")"
 if [ "$DRY_RUN" -eq 1 ]; then
   echo
   echo "Dry run: nothing was committed, tagged, pushed or released."
-  echo "Revert the rewritten files with: git checkout -- . && rm -rf build"
+  echo "Revert the rewritten files with: git checkout -- . && rm -r build"
   exit 0
 fi
 
 # --- Publish -----------------------------------------------------------------------------------
 
 git commit -am "chore: release ${TAG}"
+
+# From here on a failure leaves a local commit (and maybe a tag or a pushed tag): print how to recover.
+STEP="tag"
+on_error() {
+  local code=$?
+  trap - ERR
+  echo >&2
+  echo "ERROR: the release stopped at step '${STEP}' (exit ${code}). Recovery:" >&2
+  case "$STEP" in
+    tag|push-tag)
+      echo "  Nothing was published. To undo and start over:" >&2
+      echo "    git tag -d ${TAG}; git reset --soft HEAD~1" >&2
+      echo "  (if the tag was already pushed: git push origin :refs/tags/${TAG})" >&2
+      ;;
+    release)
+      echo "  The tag ${TAG} is on origin, but the GitHub release was not created. Retry:" >&2
+      echo "    gh release create ${TAG} build/${PLUGIN}.zip build/${PLUGIN}.zip.sha256 --title ${TAG} --notes-file ${NOTES}" >&2
+      echo "  then push the branch:  git push origin HEAD" >&2
+      echo "  To abandon instead:" >&2
+      echo "    git push origin :refs/tags/${TAG}; git tag -d ${TAG}; git reset --soft HEAD~1" >&2
+      ;;
+    push-branch)
+      echo "  The GitHub release exists, but the branch was not pushed (update.json is not live yet). Retry:" >&2
+      echo "    git push origin HEAD" >&2
+      ;;
+  esac
+  exit "$code"
+}
+trap on_error ERR
+
 git tag -a "${TAG}" -m "${TAG}"
-git push --follow-tags origin HEAD
+
+STEP="push-tag"
+git push origin "refs/tags/${TAG}"
+
+STEP="release"
 gh release create "${TAG}" \
   "build/${PLUGIN}.zip" "build/${PLUGIN}.zip.sha256" \
   --title "${TAG}" \
   --notes-file "${NOTES}"
 
+# update.json (on the branch) is what the sites poll, so it goes live only once the release exists.
+STEP="push-branch"
+git push origin HEAD
+
+trap - ERR
 echo "Released ${TAG}."
