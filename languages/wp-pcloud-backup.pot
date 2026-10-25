@@ -9,7 +9,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-10-25T11:02:35+00:00\n"
+"POT-Creation-Date: 2026-10-25T11:57:09+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.7.1\n"
 "X-Domain: wp-pcloud-backup\n"
@@ -39,8 +39,8 @@ msgid "コピーしました"
 msgstr ""
 
 #: includes/Admin/AdminPage.php:115
-#: includes/Admin/views/tab-connection.php:118
-#: includes/Admin/views/tab-connection.php:143
+#: includes/Admin/views/tab-connection.php:120
+#: includes/Admin/views/tab-connection.php:145
 msgid "コピー"
 msgstr ""
 
@@ -109,70 +109,74 @@ msgstr ""
 msgid "管理画面から中止"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:323
-msgid "バックアップを中止しました。"
+#: includes/Admin/AdminPage.php:324
+msgid "実行中のため中止できませんでした。少し待って再試行してください"
 msgstr ""
 
 #: includes/Admin/AdminPage.php:327
+msgid "バックアップを中止しました。"
+msgstr ""
+
+#: includes/Admin/AdminPage.php:331
 msgid "実行中のバックアップはありません。"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:404
+#: includes/Admin/AdminPage.php:408
 msgid "この操作を行う権限がありません。"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:420
-#: includes/Admin/views/tab-connection.php:66
+#: includes/Admin/AdminPage.php:424
+#: includes/Admin/views/tab-connection.php:68
 msgid "アクセストークンは wp-config.php の定数で設定済みです。"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:425
+#: includes/Admin/AdminPage.php:429
 msgid "アクセストークンを入力してください。"
 msgstr ""
 
 #. translators: %s: error message from pCloud.
-#: includes/Admin/AdminPage.php:439
+#: includes/Admin/AdminPage.php:443
 msgid "pCloud に接続できませんでした: %s"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:450
+#: includes/Admin/AdminPage.php:454
 msgid "トークンを暗号化して保存できませんでした。サーバーの OpenSSL 設定を確認してください。"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:455
+#: includes/Admin/AdminPage.php:459
 msgid "pCloud に接続しました。"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:507
-#: includes/Admin/views/tab-connection.php:53
+#: includes/Admin/AdminPage.php:511
+#: includes/Admin/views/tab-connection.php:55
 msgid "状態"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:508
+#: includes/Admin/AdminPage.php:512
 msgid "設定"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:509
+#: includes/Admin/AdminPage.php:513
 msgid "接続"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:565
+#: includes/Admin/AdminPage.php:569
 msgid "毎日"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:566
+#: includes/Admin/AdminPage.php:570
 msgid "3 日ごと"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:567
+#: includes/Admin/AdminPage.php:571
 msgid "毎週"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:568
+#: includes/Admin/AdminPage.php:572
 msgid "2 週間ごと"
 msgstr ""
 
-#: includes/Admin/AdminPage.php:569
+#: includes/Admin/AdminPage.php:573
 msgid "毎月"
 msgstr ""
 
@@ -209,178 +213,182 @@ msgid "作業フォルダの .htaccess"
 msgstr ""
 
 #: includes/Admin/views/tab-connection.php:23
-msgid "Apache 系サーバー"
+msgid "作業フォルダの index.php"
 msgstr ""
 
 #: includes/Admin/views/tab-connection.php:24
-msgid "DISABLE_WP_CRON"
+msgid "Apache 系サーバー"
 msgstr ""
 
 #: includes/Admin/views/tab-connection.php:25
-msgid "ディスク空き容量"
+msgid "DISABLE_WP_CRON"
 msgstr ""
 
 #: includes/Admin/views/tab-connection.php:26
+msgid "ディスク空き容量"
+msgstr ""
+
+#: includes/Admin/views/tab-connection.php:27
 msgid "未完了のジョブ"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:34
-#: includes/Admin/views/tab-connection.php:42
+#: includes/Admin/views/tab-connection.php:36
+#: includes/Admin/views/tab-connection.php:44
 msgid "あり"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:34
-#: includes/Admin/views/tab-connection.php:42
+#: includes/Admin/views/tab-connection.php:36
+#: includes/Admin/views/tab-connection.php:44
 #: includes/Notifier.php:59
 msgid "なし"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:36
+#: includes/Admin/views/tab-connection.php:38
 msgid "可"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:36
+#: includes/Admin/views/tab-connection.php:38
 msgid "不可"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:38
+#: includes/Admin/views/tab-connection.php:40
 msgid "はい"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:38
+#: includes/Admin/views/tab-connection.php:40
 msgid "いいえ"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:40
+#: includes/Admin/views/tab-connection.php:42
 msgid "有効（WP-Cron は動きません）"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:40
+#: includes/Admin/views/tab-connection.php:42
 msgid "無効"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:44
+#: includes/Admin/views/tab-connection.php:46
 msgid "不明"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:50
+#: includes/Admin/views/tab-connection.php:52
 msgid "pCloud 接続"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:56
+#: includes/Admin/views/tab-connection.php:58
 msgid "接続済み"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:60
+#: includes/Admin/views/tab-connection.php:62
 msgid "ローカルフォルダ（開発モード）"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:63
+#: includes/Admin/views/tab-connection.php:65
 msgid "未接続"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:73
+#: includes/Admin/views/tab-connection.php:75
 msgid "アクセストークンを貼り付ける"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:78
+#: includes/Admin/views/tab-connection.php:80
 msgid "アクセストークン"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:81
+#: includes/Admin/views/tab-connection.php:83
 msgid "保存前に pCloud へ接続して確認します。保存したトークンは暗号化されます。EU リージョンのアカウントは wp-config.php で WP_PCLOUD_BACKUP_API_HOST に eapi.pcloud.com を指定してください。"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:85
+#: includes/Admin/views/tab-connection.php:87
 msgid "確認して保存"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:88
+#: includes/Admin/views/tab-connection.php:90
 msgid "認可コードからトークンを取得する"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:89
+#: includes/Admin/views/tab-connection.php:91
 msgid "pCloud のアプリ（my.pcloud.com の開発者向け設定）で作成した Client ID と Client Secret を入力し、認可ページで表示されるコードを貼り付けてください。Client ID と Client Secret は保存されません。"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:97
+#: includes/Admin/views/tab-connection.php:99
 msgid "認可ページを開く"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:105
+#: includes/Admin/views/tab-connection.php:107
 msgid "認可コード"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:109
+#: includes/Admin/views/tab-connection.php:111
 msgid "トークンを取得して保存"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:114
+#: includes/Admin/views/tab-connection.php:116
 msgid "アクセストークンを表示する"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:120
+#: includes/Admin/views/tab-connection.php:122
 msgid "このトークンは今回だけ表示されます。ページを再読み込みすると消えます。"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:125
+#: includes/Admin/views/tab-connection.php:127
 msgid "現在のパスワード"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:127
+#: includes/Admin/views/tab-connection.php:129
 msgid "トークンを表示"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:135
+#: includes/Admin/views/tab-connection.php:137
 msgid "接続を解除"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:139
+#: includes/Admin/views/tab-connection.php:141
 msgid "外部 cron の URL"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:140
+#: includes/Admin/views/tab-connection.php:142
 msgid "WP-Cron が使えないサーバーでは、この URL を 1 分ごとなど定期的に呼び出してください。URL を知っていれば誰でも実行を進められるため、他人に共有しないでください。"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:147
+#: includes/Admin/views/tab-connection.php:149
 msgid "URL を再生成"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:150
+#: includes/Admin/views/tab-connection.php:152
 #: includes/Admin/views/tab-settings.php:80
 msgid "WP-Cron"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:153
+#: includes/Admin/views/tab-connection.php:155
 msgid "WP-Cron で実行"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:154
+#: includes/Admin/views/tab-connection.php:156
 msgid "オン"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:154
+#: includes/Admin/views/tab-connection.php:156
 msgid "オフ（外部 cron を使用）"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:157
+#: includes/Admin/views/tab-connection.php:159
 msgid "次回の定期チェック"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:162
+#: includes/Admin/views/tab-connection.php:164
 msgid "DISABLE_WP_CRON が有効なため、WP-Cron は実行されません。上の URL を外部 cron から呼び出してください。"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:165
+#: includes/Admin/views/tab-connection.php:167
 msgid "サーバー診断"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:167
+#: includes/Admin/views/tab-connection.php:169
 msgid "nginx 環境では作業フォルダへの直接アクセスをサーバー設定で遮断してください"
 msgstr ""
 
-#: includes/Admin/views/tab-connection.php:182
+#: includes/Admin/views/tab-connection.php:184
 msgid "要確認"
 msgstr ""
 
@@ -590,8 +598,9 @@ msgstr ""
 msgid "%1$d分%2$d秒"
 msgstr ""
 
-#: includes/Job/JobRunner.php:1115
-msgid "バックアップが周期の2倍以上成功していません"
+#. translators: %s: file or step that was being processed.
+#: includes/Job/JobRunner.php:586
+msgid "前回の実行が途中で終了しました（時間制限/メモリ不足の可能性。処理中: %s）"
 msgstr ""
 
 #. translators: %s: step name.
@@ -681,8 +690,35 @@ msgstr ""
 msgid "Every minute (WP pCloud Backup)"
 msgstr ""
 
-#: includes/Trigger.php:170
+#: includes/StaleMonitor.php:91
+msgid "トークンを復号できません（AUTH_KEY/SECURE_AUTH_KEY が変更された可能性）"
+msgstr ""
+
+#: includes/StaleMonitor.php:93
+#: includes/Trigger.php:244
 msgid "pCloud に接続されていません"
+msgstr ""
+
+#: includes/StaleMonitor.php:98
+msgid "DISABLE_WP_CRON が定義されているため、WP-Cron はアクセス時に実行されません（サーバーの cron から wp-cron.php が呼ばれていない可能性）"
+msgstr ""
+
+#: includes/StaleMonitor.php:103
+msgid "WP-Cron を使わない設定ですが、外部 cron 用 URL が一度も呼ばれていません"
+msgstr ""
+
+#. translators: %s: date and time.
+#: includes/StaleMonitor.php:106
+msgid "WP-Cron を使わない設定ですが、外部 cron 用 URL が %s 以降呼ばれていません"
+msgstr ""
+
+#: includes/StaleMonitor.php:111
+msgid "バックアップが周期の2倍以上成功していません"
+msgstr ""
+
+#. translators: %s: error message.
+#: includes/Trigger.php:286
+msgid "実行中にエラーが発生しました: %s"
 msgstr ""
 
 #: includes/Updater.php:267
