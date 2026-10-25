@@ -265,6 +265,22 @@ final class AdminPageTest extends TestCase {
 		};
 	}
 
+	/**
+	 * An empty WP_PCLOUD_BACKUP_STORAGE_DIR (how .wp-env.override.json turns development mode off)
+	 * is not development mode: Plugin::buildStorage() then uses the pCloud token.
+	 *
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_empty_storage_dir_constant_is_not_dev_storage(): void {
+		define( 'WP_PCLOUD_BACKUP_STORAGE_DIR', '' );
+
+		$method = new \ReflectionMethod( AdminPage::class, 'isDevStorage' );
+		$method->setAccessible( true );
+
+		$this->assertFalse( $method->invoke( new AdminPage( Plugin::instance() ) ) );
+	}
+
 	private function trigger( Settings $settings ): Trigger {
 		return new Trigger(
 			$settings,

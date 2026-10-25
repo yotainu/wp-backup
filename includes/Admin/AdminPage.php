@@ -364,9 +364,11 @@ class AdminPage {
 
 	/**
 	 * Local-directory storage (development mode) needs no pCloud token validation.
+	 *
+	 * Same rule as Plugin::buildStorage(): an empty value means pCloud.
 	 */
 	protected function isDevStorage(): bool {
-		return defined( 'WP_PCLOUD_BACKUP_STORAGE_DIR' );
+		return defined( 'WP_PCLOUD_BACKUP_STORAGE_DIR' ) && '' !== (string) constant( 'WP_PCLOUD_BACKUP_STORAGE_DIR' );
 	}
 
 	protected function redirect( string $url ): void {
