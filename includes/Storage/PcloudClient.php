@@ -50,8 +50,13 @@ class PcloudClient implements StorageInterface {
 			)
 		);
 		$data     = self::parse( $response );
+		$token    = (string) ( $data['access_token'] ?? '' );
 
-		return (string) ( $data['access_token'] ?? '' );
+		if ( '' === $token ) {
+			throw new StorageException( 'pCloud returned no access token', 0, false, 'auth' );
+		}
+
+		return $token;
 	}
 
 	/**
@@ -80,13 +85,14 @@ class PcloudClient implements StorageInterface {
 					'name'     => $segment,
 				)
 			);
-			$folderId = (int) $data['metadata']['folderid'];
+			$folderId = self::positiveId( $data['metadata']['folderid'] ?? null, 'folderid', 'createfolderifnotexists' );
 		}
 
 		return $folderId;
 	}
 
 	public function listFolder( int $folderId ): array {
+		self::assertFolderId( $folderId, 'list' );
 		$data  = $this->call( 'listfolder', array( 'folderid' => $folderId ) );
 		$items = array();
 		foreach ( $data['metadata']['contents'] ?? array() as $entry ) {
@@ -123,7 +129,7 @@ class PcloudClient implements StorageInterface {
 			)
 		);
 		$meta   = $data['metadata'][0] ?? array();
-		$fileId = (int) ( $meta['fileid'] ?? 0 );
+		$fileId = self::positiveId( $meta['fileid'] ?? null, 'fileid', 'uploadfile' );
 		$hashes = $this->checksum( $fileId );
 
 		return array(
@@ -134,6 +140,7 @@ class PcloudClient implements StorageInterface {
 	}
 
 	public function renameFolder( int $folderId, string $newName ): void {
+		self::assertFolderId( $folderId, 'rename' );
 		$this->call(
 			'renamefolder',
 			array(
@@ -144,6 +151,7 @@ class PcloudClient implements StorageInterface {
 	}
 
 	public function deleteFolder( int $folderId ): void {
+		self::assertFolderId( $folderId, 'delete' );
 		$this->call( 'deletefolderrecursive', array( 'folderid' => $folderId ) );
 	}
 
@@ -159,6 +167,33 @@ class PcloudClient implements StorageInterface {
 			'md5'  => (string) ( $data['md5'] ?? '' ),
 			'size' => (int) ( $data['metadata']['size'] ?? 0 ),
 		);
+	}
+
+	/**
+	 * An id from a successful response; a missing or non-positive one is a broken response
+	 * (retryable), never the pCloud root (folder id 0).
+	 *
+	 * @param mixed $value Raw value.
+	 * @throws StorageException When the id is missing or not positive.
+	 */
+	private static function positiveId( $value, string $field, string $method ): int {
+		$id = is_numeric( $value ) ? (int) $value : 0;
+		if ( $id <= 0 ) {
+			throw new StorageException( sprintf( 'pCloud %s response has no valid %s', $method, $field ), 0, true, 'server' );
+		}
+
+		return $id;
+	}
+
+	/**
+	 * Refuse to touch the pCloud root (id 0) or an invalid id: a bug upstream, never retried.
+	 *
+	 * @throws StorageException When the id is not positive.
+	 */
+	private static function assertFolderId( int $folderId, string $operation ): void {
+		if ( $folderId <= 0 ) {
+			throw new StorageException( sprintf( 'Refusing to %s folder id %d', $operation, $folderId ), 0, false, 'other' );
+		}
 	}
 
 	/**

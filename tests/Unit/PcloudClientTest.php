@@ -381,4 +381,80 @@ final class PcloudClientTest extends TestCase {
 			$this->assertFalse( $e->isRetryable() );
 		}
 	}
+	public function test_ensure_folder_without_a_valid_folderid_is_retryable(): void {
+		foreach ( array( array( 'result' => 0, 'metadata' => array() ), array( 'result' => 0 ), array( 'result' => 0, 'metadata' => array( 'folderid' => 0 ) ) ) as $response ) {
+			$http   = new FakeTransport();
+			$client = new PcloudClient( $http, 'tok' );
+			$http->queueJson( $response );
+
+			try {
+				$client->ensureFolder( '/WPBackup' );
+				$this->fail( 'Expected StorageException for ' . json_encode( $response ) );
+			} catch ( StorageException $e ) {
+				$this->assertTrue( $e->isRetryable() );
+				$this->assertSame( 'server', $e->category() );
+				$this->assertStringContainsString( 'folderid', $e->getMessage() );
+			}
+		}
+	}
+
+	public function test_upload_without_a_valid_fileid_is_retryable_and_skips_the_checksum(): void {
+		$dir  = TempDir::create();
+		$path = $dir . '/part.zip';
+		file_put_contents( $path, 'zipdata' );
+		$this->http->queueJson( array( 'result' => 0, 'metadata' => array( array( 'size' => 7 ) ) ) );
+
+		try {
+			$this->client->uploadFile( 5, $path, 'files.zip.001' );
+			$this->fail( 'Expected StorageException' );
+		} catch ( StorageException $e ) {
+			$this->assertTrue( $e->isRetryable() );
+			$this->assertSame( 'server', $e->category() );
+			$this->assertStringContainsString( 'fileid', $e->getMessage() );
+		} finally {
+			TempDir::remove( $dir );
+		}
+
+		$this->assertCount( 1, $this->http->requests, 'no checksumfile(0)' );
+	}
+
+	public function test_folder_operations_refuse_the_root_and_invalid_ids(): void {
+		$calls = array(
+			'deleteFolder' => static function ( PcloudClient $client, int $id ): void {
+				$client->deleteFolder( $id );
+			},
+			'listFolder'   => static function ( PcloudClient $client, int $id ): void {
+				$client->listFolder( $id );
+			},
+			'renameFolder' => static function ( PcloudClient $client, int $id ): void {
+				$client->renameFolder( $id, 'x' );
+			},
+		);
+
+		foreach ( $calls as $name => $call ) {
+			foreach ( array( 0, -1 ) as $id ) {
+				try {
+					$call( $this->client, $id );
+					$this->fail( $name . '(' . $id . ') did not throw' );
+				} catch ( StorageException $e ) {
+					$this->assertFalse( $e->isRetryable(), $name );
+					$this->assertSame( 'other', $e->category(), $name );
+				}
+			}
+		}
+
+		$this->assertSame( array(), $this->http->requests, 'nothing is sent' );
+	}
+
+	public function test_exchange_code_without_a_token_throws(): void {
+		$this->http->queueJson( array( 'result' => 0, 'token_type' => 'bearer' ) );
+
+		try {
+			PcloudClient::exchangeCode( $this->http, 'cid', 'csecret', 'thecode' );
+			$this->fail( 'Expected StorageException' );
+		} catch ( StorageException $e ) {
+			$this->assertFalse( $e->isRetryable() );
+			$this->assertSame( 'auth', $e->category() );
+		}
+	}
 }
