@@ -16,6 +16,16 @@ class Trigger {
 	public const NONCE_ACTION = 'wp_pcloud_backup';
 
 	/**
+	 * Transient throttling the stale check on admin_init to once per hour.
+	 */
+	public const STALE_CHECK_TRANSIENT = 'wp_pcloud_backup_stale_check';
+
+	/**
+	 * last_url_hit is written at most this often (seconds).
+	 */
+	private const URL_HIT_RESOLUTION = 60;
+
+	/**
 	 * @var Settings
 	 */
 	private $settings;
@@ -26,26 +36,44 @@ class Trigger {
 	private $runnerProvider;
 
 	/**
-	 * @param Settings $settings       Plugin settings.
-	 * @param callable $runnerProvider Returns the JobRunner (or any object with tick/run/startJob/status), or null if not connected.
+	 * @var StaleMonitor|null
 	 */
-	public function __construct( Settings $settings, callable $runnerProvider ) {
+	private $staleMonitor;
+
+	/**
+	 * @var callable
+	 */
+	private $clock;
+
+	/**
+	 * @param Settings          $settings       Plugin settings.
+	 * @param callable          $runnerProvider Returns the JobRunner (or any object with tick/run/startJob/status), or null if not connected.
+	 * @param StaleMonitor|null $staleMonitor   Stale detection run from every entry point; null disables it.
+	 * @param callable|null     $clock          fn(): int, defaults to time().
+	 */
+	public function __construct( Settings $settings, callable $runnerProvider, ?StaleMonitor $staleMonitor = null, ?callable $clock = null ) {
 		$this->settings       = $settings;
 		$this->runnerProvider = $runnerProvider;
+		$this->staleMonitor   = $staleMonitor;
+		$this->clock          = $clock ?? 'time';
 	}
 
 	public function register(): void {
 		add_action( Scheduler::HOOK, array( $this, 'onCron' ) );
 		add_action( 'init', array( $this, 'onInit' ) );
+		add_action( 'admin_init', array( $this, 'onAdminInit' ) );
 		add_action( 'wp_ajax_wp_pcloud_backup_start', array( $this, 'ajaxStart' ) );
 		add_action( 'wp_ajax_wp_pcloud_backup_run', array( $this, 'ajaxRun' ) );
 		add_action( 'wp_ajax_wp_pcloud_backup_status', array( $this, 'ajaxStatus' ) );
 	}
 
 	/**
-	 * WP-Cron tick (every minute). Skipped when an external cron drives the backup instead.
+	 * WP-Cron tick (every minute). The stale check always runs; the backup itself is
+	 * skipped when an external cron drives it instead.
 	 */
 	public function onCron(): void {
+		$this->checkStale();
+
 		if ( ! $this->settings->get( 'use_wp_cron' ) ) {
 			return;
 		}
@@ -82,6 +110,8 @@ class Trigger {
 		}
 
 		nocache_headers();
+		$this->recordUrlHit();
+		$this->checkStale();
 
 		$runner = $this->runner();
 		if ( null === $runner ) {
@@ -91,6 +121,18 @@ class Trigger {
 
 		$this->beforeLongRun();
 		wp_send_json( $runner->tick() );
+	}
+
+	/**
+	 * Stale check from the admin screens, at most once per hour.
+	 */
+	public function onAdminInit(): void {
+		if ( null === $this->staleMonitor || false !== get_transient( self::STALE_CHECK_TRANSIENT ) ) {
+			return;
+		}
+
+		set_transient( self::STALE_CHECK_TRANSIENT, 1, HOUR_IN_SECONDS );
+		$this->checkStale();
 	}
 
 	public function ajaxStart(): void {
@@ -180,6 +222,35 @@ class Trigger {
 			@set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 		}
 		ignore_user_abort( true );
+	}
+
+	/**
+	 * Run the stale check; a failure (mail, options) never stops the entry point.
+	 */
+	private function checkStale(): void {
+		if ( null === $this->staleMonitor ) {
+			return;
+		}
+
+		try {
+			$this->staleMonitor->check( $this->now() );
+		} catch ( \Throwable $e ) {
+			unset( $e );
+		}
+	}
+
+	/**
+	 * Remember when the cron URL was last called with a valid key (for the stale mail's cause).
+	 */
+	private function recordUrlHit(): void {
+		$now = $this->now();
+		if ( $now - (int) $this->settings->get( 'last_url_hit' ) >= self::URL_HIT_RESOLUTION ) {
+			$this->settings->update( array( 'last_url_hit' => $now ) );
+		}
+	}
+
+	private function now(): int {
+		return (int) ( $this->clock )();
 	}
 
 	/**

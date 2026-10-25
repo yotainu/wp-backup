@@ -61,6 +61,7 @@ delete_option( 'wp_pcloud_backup_history' );
 delete_site_transient( 'wp_pcloud_backup_update_manifest' );
 delete_site_transient( 'wp_pcloud_backup_update_fail_notified' );
 delete_transient( 'wp_pcloud_backup_notice' );
+delete_transient( 'wp_pcloud_backup_stale_check' );
 
 // One-time token reveal transients are keyed by user ID, so remove them by prefix.
 global $wpdb;

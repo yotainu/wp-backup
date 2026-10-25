@@ -61,6 +61,11 @@ final class Plugin {
 	 */
 	private $workDir = null;
 
+	/**
+	 * @var StaleMonitor|null
+	 */
+	private $staleMonitor = null;
+
 	public static function instance(): Plugin {
 		if ( null === self::$instance ) {
 			self::$instance = new self();
@@ -122,7 +127,8 @@ final class Plugin {
 		}
 
 		$settings = new Settings();
-		$settings->update( array() );
+		// Baseline for the stale check of a site that has not succeeded yet (reset on every activation).
+		$settings->update( array( 'activated_at' => time() ) );
 
 		if ( '' === (string) $settings->get( 'cron_key' ) ) {
 			( new Trigger(
@@ -259,7 +265,8 @@ final class Plugin {
 					'wp_version'     => get_bloginfo( 'version' ),
 					'plugin_version' => WP_PCLOUD_BACKUP_VERSION,
 					'abspath'        => ABSPATH,
-				)
+				),
+				$this->staleMonitor()
 			);
 		}
 
@@ -272,7 +279,8 @@ final class Plugin {
 				$this->settings(),
 				function () {
 					return $this->runner();
-				}
+				},
+				$this->staleMonitor()
 			);
 		}
 
@@ -298,6 +306,22 @@ final class Plugin {
 		}
 
 		return $this->notifier;
+	}
+
+	public function staleMonitor(): StaleMonitor {
+		if ( null === $this->staleMonitor ) {
+			$this->staleMonitor = new StaleMonitor(
+				$this->settings(),
+				$this->notifier(),
+				array(
+					'connected' => function (): bool {
+						return $this->isConnected();
+					},
+				)
+			);
+		}
+
+		return $this->staleMonitor;
 	}
 
 	public function workDir(): WorkDir {

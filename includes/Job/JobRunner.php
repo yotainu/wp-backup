@@ -10,6 +10,7 @@ use WpPcloudBackup\Retention;
 use WpPcloudBackup\Scan\FileScanner;
 use WpPcloudBackup\Scheduler;
 use WpPcloudBackup\Settings;
+use WpPcloudBackup\StaleMonitor;
 use WpPcloudBackup\Storage\StorageException;
 use WpPcloudBackup\Storage\StorageInterface;
 use WpPcloudBackup\WorkDir;
@@ -54,7 +55,8 @@ use WpPcloudBackup\Zip\ZipWriter;
  *
  * Settings written: last_scheduled (slot of a scheduled job), next_run (next slot; 0 = compute
  * from start_time; the admin page resets it to 0 when schedule or start_time change),
- * last_success, last_stale_notice. runner.lock is never deleted.
+ * last_success; StaleMonitor (called from tick) writes last_stale_notice and activated_at.
+ * runner.lock is never deleted.
  */
 final class JobRunner {
 
@@ -69,8 +71,6 @@ final class JobRunner {
 	 * A job older than this (seconds) is aborted.
 	 */
 	public const MAX_JOB_SECONDS = 172800;
-
-	private const STALE_NOTICE_INTERVAL = 86400;
 
 	private const STATE_FILE    = 'state.json';
 	private const LOCK_FILE     = 'runner.lock';
@@ -154,6 +154,13 @@ final class JobRunner {
 	private $env;
 
 	/**
+	 * "Backups have stopped" detection, run on every tick.
+	 *
+	 * @var StaleMonitor
+	 */
+	private $staleMonitor;
+
+	/**
 	 * State of the job being run (null outside run() or once the job is gone).
 	 *
 	 * @var JobState|null
@@ -177,8 +184,9 @@ final class JobRunner {
 	 * @param callable|null    $clock fn(): int, defaults to time().
 	 * @param \DateTimeZone|null $tz  Site timezone, defaults to UTC.
 	 * @param array            $env   Overrides for site_url, home_url, wp_version, plugin_version, abspath, storage_dir.
+	 * @param StaleMonitor|null $staleMonitor Stale detection; defaults to one that knows the site is connected.
 	 */
-	public function __construct( Settings $s, WorkDir $w, StorageInterface $st, Notifier $n, History $h, $wpdb, ?callable $clock = null, ?\DateTimeZone $tz = null, array $env = array() ) {
+	public function __construct( Settings $s, WorkDir $w, StorageInterface $st, Notifier $n, History $h, $wpdb, ?callable $clock = null, ?\DateTimeZone $tz = null, array $env = array(), ?StaleMonitor $staleMonitor = null ) {
 		$this->settings = $s;
 		$this->workDir  = $w;
 		$this->storage  = $st;
@@ -188,6 +196,8 @@ final class JobRunner {
 		$this->clock    = $clock ?? 'time';
 		$this->tz       = $tz ?? new \DateTimeZone( 'UTC' );
 		$this->env      = $env;
+
+		$this->staleMonitor = $staleMonitor ?? new StaleMonitor( $s, $n, array( 'connected' => true ) );
 	}
 
 	/**
@@ -198,7 +208,7 @@ final class JobRunner {
 	 */
 	public function tick(): array {
 		$now = $this->now();
-		$this->maybeNotifyStale( $now );
+		$this->staleMonitor->check( $now );
 
 		if ( null !== $this->loadState() ) {
 			return $this->run();
@@ -1100,20 +1110,6 @@ final class JobRunner {
 
 	private function siteOffset(): int {
 		return Scheduler::offsetMinutes( (string) $this->settings->get( 'site_folder' ) );
-	}
-
-	private function maybeNotifyStale( int $now ): void {
-		$lastSuccess = (int) $this->settings->get( 'last_success' );
-
-		if ( ! Scheduler::isStale( $lastSuccess > 0 ? $lastSuccess : null, (string) $this->settings->get( 'schedule' ), $now ) ) {
-			return;
-		}
-		if ( $now - (int) $this->settings->get( 'last_stale_notice' ) < self::STALE_NOTICE_INTERVAL ) {
-			return;
-		}
-
-		$this->notifier->stalled( $lastSuccess > 0 ? $lastSuccess : null, __( 'バックアップが周期の2倍以上成功していません', 'wp-pcloud-backup' ) );
-		$this->settings->update( array( 'last_stale_notice' => $now ) );
 	}
 
 	private function message( string $step, JobState $state, int $done, int $total, int $uploaded ): string {

@@ -34,6 +34,8 @@ class Settings {
 		'last_stale_notice',
 		'next_run',
 		'connection_email',
+		'activated_at',
+		'last_url_hit',
 	);
 
 	public const SCHEDULES = array( 'daily', 'every3days', 'weekly', 'biweekly', 'monthly' );
@@ -54,7 +56,7 @@ class Settings {
 	/**
 	 * Keys that hold UNIX timestamps.
 	 */
-	private const TIMESTAMP_KEYS = array( 'last_scheduled', 'last_success', 'last_stale_notice', 'next_run' );
+	private const TIMESTAMP_KEYS = array( 'last_scheduled', 'last_success', 'last_stale_notice', 'next_run', 'activated_at', 'last_url_hit' );
 
 	/**
 	 * Keys that hold booleans.
@@ -101,6 +103,8 @@ class Settings {
 			'last_stale_notice' => 0,
 			'next_run'          => 0,
 			'connection_email'  => '',
+			'activated_at'      => 0,
+			'last_url_hit'      => 0,
 		);
 	}
 
@@ -165,6 +169,20 @@ class Settings {
 		$blob = $this->stored()['access_token_enc'] ?? '';
 
 		return is_string( $blob ) && '' !== $blob ? Crypto::decrypt( $blob ) : null;
+	}
+
+	/**
+	 * Whether a stored token blob exists but cannot be decrypted (AUTH_KEY / SECURE_AUTH_KEY changed).
+	 * False when the wp-config constant provides the token.
+	 */
+	public function tokenUndecryptable(): bool {
+		if ( $this->isLocked( 'access_token' ) ) {
+			return false;
+		}
+
+		$blob = $this->stored()['access_token_enc'] ?? '';
+
+		return is_string( $blob ) && '' !== $blob && null === Crypto::decrypt( $blob );
 	}
 
 	public function setAccessToken( ?string $plain ): void {

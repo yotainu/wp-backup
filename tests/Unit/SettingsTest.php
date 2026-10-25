@@ -229,6 +229,15 @@ final class SettingsTest extends TestCase {
 		$this->options[ Settings::OPTION ] = array( 'access_token_enc' => 'garbage' );
 
 		$this->assertNull( ( new Settings() )->accessToken() );
+		$this->assertTrue( ( new Settings() )->tokenUndecryptable() );
+	}
+
+	public function test_token_undecryptable_is_false_without_a_blob_or_with_a_good_one(): void {
+		$this->assertFalse( ( new Settings() )->tokenUndecryptable() );
+
+		$settings = new Settings();
+		$settings->setAccessToken( 'tok' );
+		$this->assertFalse( $settings->tokenUndecryptable() );
 	}
 
 	public function test_save_merges_keys_changed_by_other_processes(): void {
@@ -341,5 +350,8 @@ final class SettingsTest extends TestCase {
 
 		$this->assertSame( 'const-token', $settings->accessToken() );
 		$this->assertTrue( $settings->isLocked( 'access_token' ) );
+
+		$this->options[ Settings::OPTION ]['access_token_enc'] = 'garbage';
+		$this->assertFalse( ( new Settings() )->tokenUndecryptable(), 'the constant makes the stored blob irrelevant' );
 	}
 }

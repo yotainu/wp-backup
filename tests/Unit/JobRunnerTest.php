@@ -157,6 +157,7 @@ final class JobRunnerTest extends TestCase {
 				'last_scheduled'    => 0,
 				'last_success'      => 0,
 				'last_stale_notice' => 0,
+				'use_wp_cron'       => true,
 			)
 		);
 		$this->settings = new class( $this->values ) extends Settings {

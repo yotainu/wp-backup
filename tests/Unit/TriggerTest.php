@@ -8,7 +8,9 @@ use Brain\Monkey\Functions;
 use Mockery;
 use PHPUnit\Framework\TestCase;
 use WpPcloudBackup\Scheduler;
+use WpPcloudBackup\Notifier;
 use WpPcloudBackup\Settings;
+use WpPcloudBackup\StaleMonitor;
 use WpPcloudBackup\Trigger;
 
 /**
@@ -66,6 +68,8 @@ final class TriggerTest extends TestCase {
 				return $values[ $key ] ?? null;
 			}
 		);
+		// handleUrl() records last_url_hit.
+		$settings->shouldReceive( 'update' )->andReturn( array() );
 
 		return $settings;
 	}
@@ -73,9 +77,11 @@ final class TriggerTest extends TestCase {
 	/**
 	 * Trigger whose terminate() throws instead of exiting, and whose beforeLongRun() is recorded.
 	 */
-	private function trigger( Settings $settings, ?object $runner ): Trigger {
+	private function trigger( Settings $settings, ?object $runner, ?StaleMonitor $monitor = null, ?int $now = null ): Trigger {
 		return new class( $settings, static function () use ( $runner ) {
 			return $runner;
+		}, $monitor, null === $now ? null : static function () use ( $now ): int {
+			return $now;
 		} ) extends Trigger {
 			public $longRuns = 0;
 
@@ -272,6 +278,7 @@ final class TriggerTest extends TestCase {
 
 		Actions\expectAdded( Scheduler::HOOK )->once();
 		Actions\expectAdded( 'init' )->once();
+		Actions\expectAdded( 'admin_init' )->once();
 		Actions\expectAdded( 'wp_ajax_wp_pcloud_backup_start' )->once();
 		Actions\expectAdded( 'wp_ajax_wp_pcloud_backup_run' )->once();
 		Actions\expectAdded( 'wp_ajax_wp_pcloud_backup_status' )->once();
@@ -346,5 +353,203 @@ final class TriggerTest extends TestCase {
 
 		$this->assertFalse( $sent['running'] );
 		$this->assertSame( 'pCloud に接続されていません', $sent['message'] );
+	}
+	// ------------------------------------------------------------------
+	// Stale detection from every entry point (real Settings on a fake wp_options).
+	// ------------------------------------------------------------------
+
+	private const NOW = 1800000000;
+
+	/**
+	 * Fake wp_options table.
+	 *
+	 * @var array
+	 */
+	private $options = array();
+
+	/**
+	 * Every wp_mail() call as array( to, subject, body ).
+	 *
+	 * @var array
+	 */
+	private $mails = array();
+
+	/**
+	 * Real Settings whose option holds $stored, plus a StaleMonitor on it.
+	 *
+	 * @return array{0:Settings,1:StaleMonitor}
+	 */
+	private function realSettings( array $stored, bool $connected = true ): array {
+		$this->options = array(
+			'admin_email'    => 'admin@example.com',
+			Settings::OPTION => $stored + array(
+				'schedule'     => 'daily',
+				'notify_email' => 'admin@example.com',
+				'cron_key'     => self::KEY,
+			),
+		);
+		$this->mails   = array();
+
+		Functions\when( 'get_option' )->alias(
+			function ( $name, $default = false ) {
+				return array_key_exists( $name, $this->options ) ? $this->options[ $name ] : $default;
+			}
+		);
+		Functions\when( 'update_option' )->alias(
+			function ( $name, $value ) {
+				$this->options[ $name ] = $value;
+				return true;
+			}
+		);
+		Functions\when( 'wp_cache_delete' )->justReturn( true );
+		Functions\when( 'home_url' )->justReturn( 'https://example.com' );
+		Functions\when( 'site_url' )->justReturn( 'https://example.com' );
+		Functions\when( 'sanitize_text_field' )->returnArg();
+		Functions\when( 'wp_mail' )->alias(
+			function ( $to, $subject, $message ) {
+				$this->mails[] = array( $to, $subject, $message );
+				return true;
+			}
+		);
+
+		$settings = new Settings();
+		$monitor  = new StaleMonitor(
+			$settings,
+			new Notifier( $settings, 'example.com', 'https://example.com/wp-admin/' ),
+			array(
+				'connected'        => $connected,
+				'local_storage'    => false,
+				'wp_cron_disabled' => false,
+			)
+		);
+
+		return array( $settings, $monitor );
+	}
+
+	public function test_cron_with_wp_cron_off_and_a_silent_external_cron_sends_the_stalled_mail(): void {
+		list( $settings, $monitor ) = $this->realSettings(
+			array(
+				'use_wp_cron'  => false,
+				'activated_at' => self::NOW - 10 * 86400,
+				'last_success' => self::NOW - 9 * 86400,
+				'last_url_hit' => self::NOW - 9 * 86400,
+			)
+		);
+		$runner                     = $this->fakeRunner();
+		$trigger                    = $this->trigger( $settings, $runner, $monitor, self::NOW );
+
+		$trigger->onCron();
+
+		$this->assertSame( array(), $runner->calls, 'the backup itself is still left to the external cron' );
+		$this->assertCount( 1, $this->mails );
+		$this->assertStringContainsString( '停止中', $this->mails[0][1] );
+		$this->assertStringContainsString( '外部 cron 用 URL が', $this->mails[0][2] );
+
+		$trigger->onCron();
+		$this->assertCount( 1, $this->mails, 'once a day' );
+	}
+
+	public function test_cron_without_storage_still_reports_an_undecryptable_token(): void {
+		list( $settings, $monitor ) = $this->realSettings(
+			array(
+				'use_wp_cron'      => true,
+				'activated_at'     => self::NOW - 60,
+				'access_token_enc' => base64_encode( str_repeat( "\x02", 40 ) ),
+			),
+			false
+		);
+		$trigger                    = $this->trigger( $settings, null, $monitor, self::NOW );
+
+		$trigger->onCron();
+
+		$this->assertCount( 1, $this->mails );
+		$this->assertStringContainsString( 'トークンを復号できません', $this->mails[0][2] );
+		$this->assertSame( 0, $trigger->longRuns );
+	}
+
+	public function test_url_without_storage_checks_staleness_and_records_the_hit(): void {
+		list( $settings, $monitor ) = $this->realSettings(
+			array(
+				'use_wp_cron'  => false,
+				'activated_at' => self::NOW - 10 * 86400,
+			),
+			false
+		);
+		$trigger                    = $this->trigger( $settings, null, $monitor, self::NOW );
+		$sent                       = null;
+
+		Functions\expect( 'nocache_headers' )->once();
+		Functions\when( 'wp_send_json' )->alias(
+			static function ( $data ) use ( &$sent ) {
+				$sent = $data;
+			}
+		);
+
+		$trigger->handleUrl( self::KEY );
+
+		$this->assertSame( 'pCloud に接続されていません', $sent['message'] );
+		$this->assertSame( self::NOW, $this->options[ Settings::OPTION ]['last_url_hit'] );
+		$this->assertCount( 1, $this->mails );
+		$this->assertStringContainsString( 'pCloud に接続されていません', $this->mails[0][2] );
+		$this->assertStringNotContainsString( '一度も呼ばれていません', $this->mails[0][2], 'the hit is recorded before the check' );
+	}
+
+	public function test_url_with_a_wrong_key_records_no_hit(): void {
+		list( $settings, $monitor ) = $this->realSettings( array( 'activated_at' => self::NOW - 10 * 86400 ) );
+		$trigger                    = $this->trigger( $settings, null, $monitor, self::NOW );
+
+		Functions\expect( 'status_header' )->once()->with( 403 );
+
+		try {
+			$trigger->handleUrl( str_repeat( 'f', 64 ) );
+			$this->fail( 'terminate() was not called' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'terminated', $e->getMessage() );
+		}
+
+		$this->assertArrayNotHasKey( 'last_url_hit', $this->options[ Settings::OPTION ] );
+		$this->assertSame( array(), $this->mails );
+	}
+
+	public function test_admin_init_checks_at_most_once_an_hour(): void {
+		list( $settings, $monitor ) = $this->realSettings(
+			array(
+				'use_wp_cron'  => true,
+				'activated_at' => self::NOW - 10 * 86400,
+			)
+		);
+		$trigger                    = $this->trigger( $settings, null, $monitor, self::NOW );
+		$transients                 = array();
+
+		Functions\when( 'get_transient' )->alias(
+			static function ( $name ) use ( &$transients ) {
+				return $transients[ $name ] ?? false;
+			}
+		);
+		Functions\when( 'set_transient' )->alias(
+			static function ( $name, $value, $ttl ) use ( &$transients ) {
+				$transients[ $name ] = array( $value, $ttl );
+				return true;
+			}
+		);
+
+		$trigger->onAdminInit();
+		$this->assertCount( 1, $this->mails );
+		$this->assertSame( HOUR_IN_SECONDS, $transients[ Trigger::STALE_CHECK_TRANSIENT ][1] );
+
+		// Within the hour the check does not run at all, even after the 24 h throttle is cleared.
+		$this->options[ Settings::OPTION ]['last_stale_notice'] = 0;
+		$trigger->onAdminInit();
+		$this->assertCount( 1, $this->mails );
+	}
+
+	public function test_fresh_install_sends_nothing_from_cron(): void {
+		list( $settings, $monitor ) = $this->realSettings( array( 'use_wp_cron' => false ) );
+		$trigger                    = $this->trigger( $settings, null, $monitor, self::NOW );
+
+		$trigger->onCron();
+
+		$this->assertSame( array(), $this->mails );
+		$this->assertSame( self::NOW, $this->options[ Settings::OPTION ]['activated_at'] );
 	}
 }
