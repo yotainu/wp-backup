@@ -38,6 +38,10 @@ final class RetentionTest extends TestCase {
 		parent::tearDown();
 	}
 
+	/**
+	 * Note: after Brain Monkey has been active in the same process, touch() stores mtime + 1,
+	 * so assertions must not depend on an exact-second boundary.
+	 */
 	private function makeFolder( string $name, int $modified ): void {
 		$this->storage->ensureFolder( '/WPBackup/example.com/' . $name );
 		touch( $this->base . '/WPBackup/example.com/' . $name, $modified );
@@ -91,7 +95,7 @@ final class RetentionTest extends TestCase {
 	public function test_incomplete_folders_not_counted_and_pruned_after_ttl(): void {
 		$this->makeFolder( '2026-10-01_030000', self::NOW );
 		$this->makeFolder( '2026-10-02_030000', self::NOW );
-		$this->makeFolder( '.incomplete-2026-09-01_030000', self::NOW - 172800 - 1 );
+		$this->makeFolder( '.incomplete-2026-09-01_030000', self::NOW - 172800 - 3600 );
 		$this->makeFolder( '.incomplete-2026-10-24_030000', self::NOW - 3600 );
 
 		$deleted = ( new Retention( $this->storage, $this->siteId ) )->prune( 2, self::NOW );
