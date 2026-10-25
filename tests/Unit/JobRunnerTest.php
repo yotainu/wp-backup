@@ -1,0 +1,860 @@
+<?php
+
+namespace WpPcloudBackup\Tests\Unit;
+
+use Brain\Monkey;
+use Brain\Monkey\Functions;
+use PHPUnit\Framework\TestCase;
+use WpPcloudBackup\History;
+use WpPcloudBackup\Job\JobRunner;
+use WpPcloudBackup\Job\JobState;
+use WpPcloudBackup\Notifier;
+use WpPcloudBackup\Scheduler;
+use WpPcloudBackup\Settings;
+use WpPcloudBackup\Storage\LocalStorage;
+use WpPcloudBackup\Storage\StorageException;
+use WpPcloudBackup\Storage\StorageInterface;
+use WpPcloudBackup\Tests\Support\FakeWpdb;
+use WpPcloudBackup\Tests\Support\TempDir;
+use WpPcloudBackup\WorkDir;
+
+final class JobRunnerTest extends TestCase {
+
+	private const PART_SIZE = 524288;
+
+	private const BUDGET = 5;
+
+	private const MAX_RUNS = 500;
+
+	/**
+	 * Temporary base directory (site, uploads, remote).
+	 *
+	 * @var string
+	 */
+	private $base;
+
+	/**
+	 * Fixture site root (backup_root).
+	 *
+	 * @var string
+	 */
+	private $site;
+
+	/**
+	 * LocalStorage base directory.
+	 *
+	 * @var string
+	 */
+	private $remote;
+
+	/**
+	 * Fixture files: relative path => contents.
+	 *
+	 * @var array<string,string>
+	 */
+	private $files = array();
+
+	/**
+	 * Fake current time.
+	 *
+	 * @var int
+	 */
+	private $now;
+
+	/**
+	 * Seconds the clock advances on every read.
+	 *
+	 * @var int
+	 */
+	private $tick = 2;
+
+	/**
+	 * Number of clock reads.
+	 *
+	 * @var int
+	 */
+	private $clockReads = 0;
+
+	/**
+	 * Option store for History.
+	 *
+	 * @var array
+	 */
+	private $options = array();
+
+	/**
+	 * Every wp_mail() call as array( to, subject, body ).
+	 *
+	 * @var array
+	 */
+	private $mails = array();
+
+	/**
+	 * Settings values shared with the Settings stub.
+	 *
+	 * @var \ArrayObject
+	 */
+	private $values;
+
+	/**
+	 * @var Settings
+	 */
+	private $settings;
+
+	/**
+	 * @var WorkDir
+	 */
+	private $workDir;
+
+	protected function setUp(): void {
+		parent::setUp();
+		Monkey\setUp();
+		Functions\stubTranslationFunctions();
+
+		$this->options = array();
+		$this->mails   = array();
+		Functions\when( 'get_option' )->alias(
+			function ( $name, $default = false ) {
+				return array_key_exists( $name, $this->options ) ? $this->options[ $name ] : $default;
+			}
+		);
+		Functions\when( 'update_option' )->alias(
+			function ( $name, $value ) {
+				$this->options[ $name ] = $value;
+				return true;
+			}
+		);
+		Functions\when( 'wp_mail' )->alias(
+			function ( $to, $subject, $message ) {
+				$this->mails[] = array( $to, $subject, $message );
+				return true;
+			}
+		);
+
+		$this->base   = TempDir::create();
+		$this->site   = $this->base . '/site';
+		$this->remote = $this->base . '/remote';
+		mkdir( $this->base . '/uploads' );
+		$this->makeFixture();
+
+		$this->now        = time();
+		$this->tick       = 2;
+		$this->clockReads = 0;
+
+		$this->values   = new \ArrayObject(
+			array(
+				'backup_root'       => $this->site,
+				'excludes'          => array( 'cache' ),
+				'root_folder'       => '/WPBackup',
+				'site_folder'       => 'example.com',
+				'schedule'          => 'daily',
+				'start_time'        => '03:00',
+				'keep'              => 3,
+				'run_budget_sec'    => self::BUDGET,
+				'notify_email'      => 'admin@example.com',
+				'notify_on_success' => false,
+				'workdir_name'      => '',
+				'last_scheduled'    => 0,
+				'last_success'      => 0,
+				'last_stale_notice' => 0,
+			)
+		);
+		$this->settings = new class( $this->values ) extends Settings {
+			/**
+			 * @var \ArrayObject
+			 */
+			private $values;
+
+			public function __construct( \ArrayObject $values ) {
+				$this->values = $values;
+			}
+
+			public function get( string $key ) {
+				return $this->values[ $key ] ?? null;
+			}
+
+			public function update( array $input ): array {
+				foreach ( $input as $key => $value ) {
+					$this->values[ $key ] = $value;
+				}
+				return $this->values->getArrayCopy();
+			}
+
+			public function partSizeBytes(): int {
+				return 524288;
+			}
+		};
+		$this->workDir  = new WorkDir( $this->settings, $this->base . '/uploads' );
+	}
+
+	protected function tearDown(): void {
+		TempDir::remove( $this->base );
+		Monkey\tearDown();
+		parent::tearDown();
+	}
+
+	// ------------------------------------------------------------------
+	// Fixture helpers.
+	// ------------------------------------------------------------------
+
+	/**
+	 * About 50 files in nested folders, about 3 MB; four incompressible "jpg" files of 300-700 KB.
+	 */
+	private function makeFixture(): void {
+		$this->files = array();
+		for ( $i = 0; $i < 46; $i++ ) {
+			$dir  = sprintf( 'dir%02d/sub%d', $i % 10, $i % 3 );
+			$name = sprintf( '%s/file%02d.txt', $dir, $i );
+
+			$this->files[ $name ] = str_repeat( sprintf( "line %d of file %d\n", $i, $i ), 1500 + $i * 40 );
+		}
+		foreach ( array( 300, 450, 600, 700 ) as $n => $kb ) {
+			$this->files[ sprintf( 'wp-content/uploads/photo%d.jpg', $n ) ] = random_bytes( $kb * 1024 );
+		}
+		$this->files['日本語/ファイル.txt'] = 'こんにちは';
+		$this->files['empty.txt']          = '';
+
+		foreach ( $this->files as $relative => $contents ) {
+			$path = $this->site . '/' . $relative;
+			if ( ! is_dir( dirname( $path ) ) ) {
+				mkdir( dirname( $path ), 0777, true );
+			}
+			file_put_contents( $path, $contents );
+		}
+
+		// Excluded by the "cache" pattern.
+		mkdir( $this->site . '/wp-content/cache', 0777, true );
+		file_put_contents( $this->site . '/wp-content/cache/page.html', 'cached' );
+	}
+
+	private function table( string $name, int $rows ): array {
+		$data = array();
+		for ( $i = 1; $i <= $rows; $i++ ) {
+			$data[] = array(
+				'id'   => (string) $i,
+				'name' => $name . '-' . $i,
+			);
+		}
+
+		return array(
+			'create'  => 'CREATE TABLE `' . $name . '` (`id` bigint(20) NOT NULL, `name` varchar(50) DEFAULT NULL, PRIMARY KEY (`id`))',
+			'columns' => array(
+				array(
+					'Field' => 'id',
+					'Type'  => 'bigint(20)',
+					'Key'   => 'PRI',
+				),
+				array(
+					'Field' => 'name',
+					'Type'  => 'varchar(50)',
+					'Key'   => '',
+				),
+			),
+			'rows'    => $data,
+		);
+	}
+
+	private function wpdb( array $tables = null ): FakeWpdb {
+		return new FakeWpdb(
+			$tables ?? array(
+				'wp_options' => $this->table( 'wp_options', 30 ),
+				'wp_posts'   => $this->table( 'wp_posts', 12 ),
+			)
+		);
+	}
+
+	private function clock(): callable {
+		return function (): int {
+			++$this->clockReads;
+			$time       = $this->now;
+			$this->now += $this->tick;
+
+			return $time;
+		};
+	}
+
+	private function runner( StorageInterface $storage = null, FakeWpdb $wpdb = null ): JobRunner {
+		return new JobRunner(
+			$this->settings,
+			$this->workDir,
+			$storage ?? new LocalStorage( $this->remote ),
+			new Notifier( $this->settings, 'example.com', 'https://example.com/wp-admin/' ),
+			new History(),
+			$wpdb ?? $this->wpdb(),
+			$this->clock(),
+			new \DateTimeZone( 'Asia/Tokyo' ),
+			array(
+				'site_url'       => 'https://example.com',
+				'home_url'       => 'https://example.com',
+				'wp_version'     => '6.6',
+				'plugin_version' => '1.0.0-test',
+				'abspath'        => $this->site . '/',
+			)
+		);
+	}
+
+	/**
+	 * Call run() until the job is gone; fail after MAX_RUNS.
+	 *
+	 * @param callable|null $after Called after each run with (status, runNumber).
+	 * @return int Number of runs.
+	 */
+	private function runToEnd( JobRunner $runner, callable $after = null ): int {
+		for ( $i = 1; $i <= self::MAX_RUNS; $i++ ) {
+			$status = $runner->run();
+			if ( null !== $after ) {
+				$after( $status, $i );
+			}
+			if ( ! $status['running'] ) {
+				return $i;
+			}
+		}
+
+		$this->fail( 'Job did not finish within ' . self::MAX_RUNS . ' runs' );
+	}
+
+	private function stateFile(): string {
+		return $this->workDir->path( 'state.json' );
+	}
+
+	private function readState(): array {
+		return json_decode( (string) file_get_contents( $this->stateFile() ), true );
+	}
+
+	private function writeState( array $data ): void {
+		file_put_contents( $this->stateFile(), json_encode( $data ) );
+	}
+
+	private function siteRemote(): string {
+		return $this->remote . '/WPBackup/example.com';
+	}
+
+	/**
+	 * Names of the folders in the remote site folder.
+	 *
+	 * @return string[]
+	 */
+	private function remoteFolders(): array {
+		if ( ! is_dir( $this->siteRemote() ) ) {
+			return array();
+		}
+
+		return array_values( array_diff( scandir( $this->siteRemote() ), array( '.', '..' ) ) );
+	}
+
+	private function onlyGeneration(): string {
+		$folders = $this->remoteFolders();
+		$this->assertCount( 1, $folders, 'exactly one generation folder' );
+		$this->assertMatchesRegularExpression( '/^\d{4}-\d{2}-\d{2}_\d{6}$/', $folders[0] );
+
+		return $this->siteRemote() . '/' . $folders[0];
+	}
+
+	/**
+	 * Concatenate the uploaded parts and open the result with ZipArchive.
+	 */
+	private function openArchive( string $generation ): \ZipArchive {
+		$parts = glob( $generation . '/files.zip.*' );
+		sort( $parts );
+		$this->assertNotEmpty( $parts );
+
+		$joined = $this->base . '/joined.zip';
+		$out    = fopen( $joined, 'wb' );
+		foreach ( $parts as $part ) {
+			$this->assertLessThanOrEqual( self::PART_SIZE, filesize( $part ) );
+			fwrite( $out, (string) file_get_contents( $part ) );
+		}
+		fclose( $out );
+
+		$zip = new \ZipArchive();
+		$this->assertTrue( true === $zip->open( $joined, \ZipArchive::CHECKCONS ), 'archive opens with CHECKCONS' );
+
+		return $zip;
+	}
+
+	/**
+	 * Assert the archive holds exactly the expected files with identical contents.
+	 *
+	 * @param array<string,string> $expected
+	 */
+	private function assertArchiveMatches( string $generation, array $expected ): void {
+		$zip = $this->openArchive( $generation );
+		$this->assertSame( count( $expected ), $zip->numFiles );
+		foreach ( $expected as $relative => $contents ) {
+			$this->assertSame( $contents, $zip->getFromName( $relative ), 'entry ' . $relative );
+		}
+		$zip->close();
+	}
+
+	/**
+	 * Job files left in the work directory (everything but .htaccess and index.php).
+	 *
+	 * @return string[]
+	 */
+	private function leftoverJobFiles(): array {
+		return array_values( array_diff( scandir( $this->workDir->path() ), array( '.', '..', '.htaccess', 'index.php' ) ) );
+	}
+
+	/**
+	 * Storage decorator delegating to LocalStorage, with a hook on uploadFile.
+	 */
+	private function decoratedStorage( callable $onUpload ): StorageInterface {
+		return new class( new LocalStorage( $this->remote ), $onUpload ) implements StorageInterface {
+			/**
+			 * @var StorageInterface
+			 */
+			private $inner;
+
+			/**
+			 * @var callable
+			 */
+			private $onUpload;
+
+			public function __construct( StorageInterface $inner, callable $onUpload ) {
+				$this->inner    = $inner;
+				$this->onUpload = $onUpload;
+			}
+
+			public function ensureFolder( string $path ): int {
+				return $this->inner->ensureFolder( $path );
+			}
+
+			public function listFolder( int $folderId ): array {
+				return $this->inner->listFolder( $folderId );
+			}
+
+			public function uploadFile( int $folderId, string $localPath, string $name ): array {
+				( $this->onUpload )( $name );
+				return $this->inner->uploadFile( $folderId, $localPath, $name );
+			}
+
+			public function renameFolder( int $folderId, string $newName ): void {
+				$this->inner->renameFolder( $folderId, $newName );
+			}
+
+			public function deleteFolder( int $folderId ): void {
+				$this->inner->deleteFolder( $folderId );
+			}
+
+			public function deleteFile( int $fileId ): void {
+				$this->inner->deleteFile( $fileId );
+			}
+
+			public function checksum( int $fileId ): array {
+				return $this->inner->checksum( $fileId );
+			}
+		};
+	}
+
+	// ------------------------------------------------------------------
+	// Tests.
+	// ------------------------------------------------------------------
+
+	public function test_full_job_completes_over_many_runs(): void {
+		$runner = $this->runner();
+
+		$this->assertTrue( $runner->startJob( 'manual' ) );
+		$this->assertFalse( $runner->startJob( 'manual' ), 'a second job cannot start while one exists' );
+
+		$status = $runner->status();
+		$this->assertTrue( $status['running'] );
+		$this->assertSame( 'prepare', $status['step'] );
+
+		$steps    = array();
+		$progress = array();
+		$runs     = $this->runToEnd(
+			$runner,
+			function ( array $status ) use ( &$steps, &$progress ) {
+				if ( $status['running'] ) {
+					$steps[ $status['step'] ] = true;
+					$progress[]               = $status['progress'];
+				}
+			}
+		);
+
+		$this->assertGreaterThan( 10, $runs, 'the job is spread over many runs' );
+		$this->assertArrayHasKey( 'scan', $steps );
+		$this->assertArrayHasKey( 'zip', $steps );
+		$this->assertArrayHasKey( 'upload', $steps );
+		foreach ( $progress as $value ) {
+			$this->assertGreaterThanOrEqual( 0.0, $value );
+			$this->assertLessThanOrEqual( 1.0, $value );
+		}
+
+		$status = $runner->status();
+		$this->assertFalse( $status['running'] );
+		$this->assertNull( $status['step'] );
+
+		$generation = $this->onlyGeneration();
+		$this->assertSame( array(), glob( $this->siteRemote() . '/.incomplete-*' ) );
+		$this->assertFileExists( $generation . '/manifest.json' );
+		$this->assertFileExists( $generation . '/database.sql.gz' );
+		$this->assertGreaterThan( 3, count( glob( $generation . '/files.zip.*' ) ), 'several 512 KB parts' );
+
+		$this->assertArchiveMatches( $generation, $this->files );
+
+		$manifest = json_decode( (string) file_get_contents( $generation . '/manifest.json' ), true );
+		$this->assertSame( count( $this->files ), $manifest['files_count'] );
+		$this->assertSame( array_sum( array_map( 'strlen', $this->files ) ), $manifest['files_bytes'] );
+		$this->assertSame( array(), $manifest['warnings'] );
+		$this->assertSame( array( 'wp_options', 'wp_posts' ), $manifest['database']['tables'] );
+		$this->assertSame( 42, $manifest['database']['rows'] );
+		$this->assertSame( sha1_file( $generation . '/database.sql.gz' ), $manifest['database']['sha1'] );
+		$this->assertSame( 'https://example.com', $manifest['site_url'] );
+		$this->assertSame( '1.0.0-test', $manifest['plugin_version'] );
+		$this->assertSame( array( 'cache' ), $manifest['excludes'] );
+		$this->assertCount( count( glob( $generation . '/files.zip.*' ) ), $manifest['parts'] );
+		foreach ( $manifest['parts'] as $part ) {
+			$this->assertSame( sha1_file( $generation . '/' . $part['name'] ), $part['sha1'] );
+			$this->assertSame( hash_file( 'sha256', $generation . '/' . $part['name'] ), $part['sha256'] );
+		}
+
+		$sql = gzdecode( (string) file_get_contents( $generation . '/database.sql.gz' ) );
+		$this->assertStringContainsString( 'CREATE TABLE `wp_posts`', $sql );
+		$this->assertStringContainsString( "(30, 'wp_options-30')", $sql );
+
+		$history = ( new History() )->all();
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'success', $history[0]['result'] );
+		$this->assertSame( count( $this->files ), $history[0]['files'] );
+		$this->assertSame( '/WPBackup/example.com/' . basename( $generation ), $history[0]['remote'] );
+
+		$this->assertSame( array(), $this->mails, 'no mail for a clean success when notify_on_success is off' );
+		$this->assertGreaterThan( 0, $this->values['last_success'] );
+		$this->assertSame( 0, $this->values['last_scheduled'], 'a manual job does not move the schedule' );
+		$this->assertSame( array(), $this->leftoverJobFiles() );
+	}
+
+	public function test_each_run_respects_budget_except_upload(): void {
+		$slowUploads = 0;
+		$storage     = $this->decoratedStorage(
+			function ( string $name ) use ( &$slowUploads ) {
+				if ( 0 === strpos( $name, 'files.zip.' ) ) {
+					++$slowUploads;
+					$this->now += 60; // A slow upload, far beyond the 5 s budget.
+				}
+			}
+		);
+		$runner = $this->runner( $storage );
+		$runner->startJob( 'manual' );
+
+		$timeStopped = array(
+			'scan' => 0,
+			'zip'  => 0,
+		);
+		$uploadRuns  = 0;
+		for ( $i = 0; $i < self::MAX_RUNS; $i++ ) {
+			$before = $runner->status();
+			if ( ! $before['running'] ) {
+				break;
+			}
+			$start = $this->now;
+			$after = $runner->run();
+
+			$elapsed = $this->now - $start;
+			if ( isset( $timeStopped[ $before['step'] ] ) && $after['running'] && $before['step'] === $after['step'] && $before['parts_uploaded'] === $after['parts_uploaded'] ) {
+				// The step did not finish and nothing was uploaded: the run must have stopped on the clock.
+				$this->assertGreaterThanOrEqual( self::BUDGET, $elapsed, 'run stopped by budget in ' . $before['step'] );
+				$this->assertLessThan( self::BUDGET + 10, $elapsed, 'run stopped soon after the budget in ' . $before['step'] );
+				++$timeStopped[ $before['step'] ];
+			}
+			if ( 'upload' === $before['step'] ) {
+				++$uploadRuns;
+				$this->assertSame( $before['parts_uploaded'] + 1, $after['running'] ? $after['parts_uploaded'] : $before['parts_uploaded'] + 1, 'exactly one part per upload run' );
+				$this->assertGreaterThan( self::BUDGET, $elapsed, 'the upload ran past the budget instead of stopping' );
+			}
+		}
+
+		$this->assertFalse( $runner->status()['running'] );
+		$this->assertGreaterThan( 0, $timeStopped['scan'], 'scan was cut by the budget at least once' );
+		$this->assertGreaterThan( 0, $timeStopped['zip'], 'zip was cut by the budget at least once' );
+		$this->assertGreaterThan( 0, $uploadRuns );
+		$this->assertGreaterThan( 3, $slowUploads );
+		$this->assertArchiveMatches( $this->onlyGeneration(), $this->files );
+	}
+
+	public function test_unreadable_file_becomes_warning(): void {
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+
+		for ( $i = 0; $i < self::MAX_RUNS && in_array( $runner->status()['step'], array( 'prepare', 'scan' ), true ); $i++ ) {
+			$runner->run();
+		}
+		$status = $runner->status();
+		$this->assertContains( $status['step'], array( 'dump', 'compress', 'zip', 'upload' ), 'scan finished' );
+		$this->assertLessThan( $status['files_total'], $status['files_done'], 'zip has not reached the end of the list' );
+
+		// The last listed file cannot have been zipped yet.
+		$lines   = file( $this->workDir->path( 'filelist.jsonl' ), FILE_IGNORE_NEW_LINES );
+		$removed = json_decode( end( $lines ), true )['p'];
+		unlink( $this->site . '/' . $removed );
+
+		$this->runToEnd( $runner );
+
+		$generation = $this->onlyGeneration();
+		$expected   = $this->files;
+		unset( $expected[ $removed ] );
+		$this->assertArchiveMatches( $generation, $expected );
+
+		$manifest = json_decode( (string) file_get_contents( $generation . '/manifest.json' ), true );
+		$this->assertSame( array( 'unreadable file: ' . $removed ), $manifest['warnings'] );
+		$this->assertSame( count( $expected ), $manifest['files_count'] );
+
+		$history = ( new History() )->all();
+		$this->assertSame( 'warning', $history[0]['result'] );
+
+		$this->assertCount( 1, $this->mails, 'warnings are mailed even with notify_on_success off' );
+		$this->assertStringContainsString( '完了(警告あり)', $this->mails[0][1] );
+		$this->assertStringContainsString( 'unreadable file: ' . $removed, $this->mails[0][2] );
+	}
+
+	public function test_retryable_error_retries_then_fails_after_5(): void {
+		$uploads = 0;
+		$storage = $this->decoratedStorage(
+			static function () use ( &$uploads ) {
+				++$uploads;
+				throw new StorageException( 'connection reset', 0, true, 'network' );
+			}
+		);
+		$runner  = $this->runner( $storage );
+		$runner->startJob( 'manual' );
+
+		$errors = array();
+		$this->runToEnd(
+			$runner,
+			function ( array $status ) use ( &$errors ) {
+				if ( $status['running'] && null !== $status['last_error'] ) {
+					$errors[] = $status['last_error'];
+				}
+			}
+		);
+
+		$this->assertSame( 5, $uploads, 'four retries after the first failure, then abort' );
+		$this->assertCount( 4, $errors );
+		$this->assertSame( 'connection reset', $errors[0] );
+
+		$this->assertSame( array(), $this->remoteFolders(), 'the .incomplete folder is deleted' );
+		$this->assertSame( array(), $this->leftoverJobFiles(), 'local job files are deleted' );
+		$this->assertCount( 1, $this->mails );
+		$this->assertStringContainsString( '失敗', $this->mails[0][1] );
+		$this->assertStringContainsString( 'upload', $this->mails[0][2] );
+		$this->assertStringContainsString( '試行回数: 5', $this->mails[0][2] );
+
+		$history = ( new History() )->all();
+		$this->assertCount( 1, $history );
+		$this->assertSame( 'failed', $history[0]['result'] );
+		$this->assertSame( 'connection reset', $history[0]['message'] );
+		$this->assertSame( 0, $this->values['last_success'] );
+	}
+
+	public function test_fatal_error_aborts_immediately(): void {
+		$uploads = 0;
+		$storage = $this->decoratedStorage(
+			static function () use ( &$uploads ) {
+				++$uploads;
+				throw new StorageException( 'User is over quota', 2008, false, 'quota' );
+			}
+		);
+		$runner  = $this->runner( $storage );
+		$runner->startJob( 'manual' );
+
+		$this->runToEnd( $runner );
+
+		$this->assertSame( 1, $uploads );
+		$this->assertSame( array(), $this->remoteFolders() );
+		$this->assertSame( array(), $this->leftoverJobFiles() );
+		$this->assertCount( 1, $this->mails );
+		$this->assertStringContainsString( '失敗', $this->mails[0][1] );
+		$this->assertStringContainsString( 'User is over quota', $this->mails[0][2] );
+		$this->assertSame( 'failed', ( new History() )->all()[0]['result'] );
+	}
+
+	public function test_lock_prevents_concurrent_run(): void {
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+
+		$other = JobState::load( $this->stateFile() );
+		$this->assertTrue( $other->acquireLock( $this->workDir->path( 'runner.lock' ) ) );
+
+		$before = file_get_contents( $this->stateFile() );
+		$status = $runner->run();
+		$this->assertTrue( $status['running'] );
+		$this->assertSame( 'prepare', $status['step'] );
+		$this->assertSame( $before, file_get_contents( $this->stateFile() ), 'nothing was touched while locked' );
+		$this->assertSame( array(), $this->remoteFolders() );
+
+		$other->releaseLock();
+		$this->assertNotSame( 'prepare', $runner->run()['step'] );
+	}
+
+	public function test_rapid_fire_guard(): void {
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+		$this->tick = 0;
+
+		$runner->run();
+		$state = $this->readState();
+		$this->assertSame( $this->now, $state['last_run_started'] );
+		$this->assertSame( $this->now, $state['last_run_finished'] );
+
+		// A finished run does not block the next one, even at the same time.
+		$runner->run();
+		$state = $this->readState();
+
+		// Simulate a run that started now and died without finishing.
+		$state['last_run_finished'] = $state['last_run_started'] - 1;
+		$this->writeState( $state );
+		$before = file_get_contents( $this->stateFile() );
+
+		$runner->run();
+		$this->assertSame( $before, file_get_contents( $this->stateFile() ), 'second run at the same time does nothing' );
+
+		$this->now += self::BUDGET * 3 - 1;
+		$runner->run();
+		$this->assertSame( $before, file_get_contents( $this->stateFile() ), 'still inside budget x 3' );
+
+		$this->now += 1;
+		$runner->run();
+		$this->assertNotSame( $before, file_get_contents( $this->stateFile() ), 'runs again after budget x 3' );
+		$this->assertSame( $this->now, $this->readState()['last_run_started'] );
+	}
+
+	public function test_tick_starts_job_when_due_and_sends_stale_notice(): void {
+		$tz     = new \DateTimeZone( 'Asia/Tokyo' );
+		$offset = Scheduler::offsetMinutes( 'example.com' );
+		$runner = $this->runner();
+		$this->tick = 0;
+
+		// Never scheduled before: the grid is anchored, nothing starts yet.
+		$status = $runner->tick();
+		$this->assertFalse( $status['running'] );
+		$anchor = $this->values['last_scheduled'];
+		$this->assertGreaterThan( $this->now - 86400, $anchor );
+		$this->assertLessThanOrEqual( $this->now, $anchor );
+		$this->assertSame( $anchor, Scheduler::nextRun( 'daily', '03:00', $offset, null, $anchor - 1, $tz ), 'anchor is a grid slot' );
+		$this->assertSame( array(), $this->mails );
+
+		// Three slots missed and the last success is four days old.
+		$this->values['last_scheduled'] = $anchor - 3 * 86400;
+		$this->values['last_success']   = $this->now - 4 * 86400;
+
+		$status = $runner->tick();
+		$this->assertTrue( $status['running'], 'a due slot starts a job' );
+		$this->assertSame( 'schedule', $this->readState()['trigger'] );
+		$this->assertSame( $anchor, $this->values['last_scheduled'], 'the latest due slot is recorded, missed slots are not replayed' );
+		$this->assertNotSame( 'prepare', $status['step'], 'tick ran the first run' );
+
+		$this->assertCount( 1, $this->mails );
+		$this->assertStringContainsString( '停止中', $this->mails[0][1] );
+		$this->assertStringContainsString( 'バックアップが周期の2倍以上成功していません', $this->mails[0][2] );
+		$this->assertSame( $this->now, $this->values['last_stale_notice'] );
+
+		// Within 24 h: no second stale notice; the running job just advances.
+		$this->now += 3600;
+		$runner->tick();
+		$this->assertCount( 1, $this->mails );
+
+		// Next day, still stale: one more notice.
+		$this->now += 86400;
+		$runner->tick();
+		$this->assertCount( 2, $this->mails );
+		$this->assertStringContainsString( '停止中', $this->mails[1][1] );
+	}
+
+	public function test_crash_mid_entry_is_truncated_on_resume(): void {
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+
+		$junk = 64;
+		for ( $i = 0; $i < self::MAX_RUNS; $i++ ) {
+			$state = $this->readState();
+			if ( 'zip' === $state['step'] && ( $state['zip']['entries'] ?? 0 ) >= 3 && $state['parts']['current_size'] + $junk <= self::PART_SIZE ) {
+				break;
+			}
+			$runner->run();
+		}
+		$this->assertSame( 'zip', $state['step'] );
+
+		// Pretend the last run died while writing an entry: junk after the entry start,
+		// saved in the state with in_progress_offset pointing at the entry start.
+		$parts = $state['parts'];
+		$path  = $this->workDir->path( sprintf( 'files.zip.%03d', $parts['current_index'] ) );
+		file_put_contents( $path, random_bytes( $junk ), FILE_APPEND );
+		$state['zip']['in_progress_offset'] = $parts['offset'];
+		$state['parts']['current_size']    += $junk;
+		$state['parts']['offset']          += $junk;
+		$this->writeState( $state );
+
+		$this->runToEnd( $runner );
+
+		$this->assertArchiveMatches( $this->onlyGeneration(), $this->files );
+		$this->assertSame( 'success', ( new History() )->all()[0]['result'] );
+	}
+
+	public function test_scan_resume_drops_lines_written_after_the_saved_state(): void {
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+
+		for ( $i = 0; $i < self::MAX_RUNS; $i++ ) {
+			$runner->run();
+			$state = $this->readState();
+			if ( 'scan' === $state['step'] && ( $state['scan_lines'] ?? 0 ) > 0 ) {
+				break;
+			}
+		}
+		$this->assertSame( 'scan', $state['step'], 'scan spans several runs' );
+
+		// A run appended a line and died before saving the state.
+		$list = $this->workDir->path( 'filelist.jsonl' );
+		file_put_contents( $list, '{"p":"empty.txt","s":0,"m":0}' . "\n", FILE_APPEND );
+		$this->assertGreaterThan( $state['scan_bytes'], filesize( $list ) );
+
+		$this->runToEnd( $runner );
+
+		$this->assertArchiveMatches( $this->onlyGeneration(), $this->files );
+	}
+
+	public function test_dump_without_tables_aborts(): void {
+		$runner = $this->runner( null, $this->wpdb( array() ) );
+		$runner->startJob( 'manual' );
+
+		$this->runToEnd( $runner );
+
+		$history = ( new History() )->all();
+		$this->assertSame( 'failed', $history[0]['result'] );
+		$this->assertSame( 'no tables found', $history[0]['message'] );
+		$this->assertSame( array(), $this->remoteFolders() );
+	}
+
+	public function test_deadline_aborts_with_timeout(): void {
+		$runner = $this->runner();
+		$runner->startJob( 'manual' );
+		$runner->run();
+
+		$this->now += 172800 + 60;
+		$status = $runner->run();
+
+		$this->assertFalse( $status['running'] );
+		$this->assertSame( 'timeout', ( new History() )->all()[0]['message'] );
+		$this->assertSame( array(), $this->remoteFolders() );
+	}
+
+	public function test_status_when_idle(): void {
+		$status = $this->runner()->status();
+
+		$this->assertSame(
+			array(
+				'running'        => false,
+				'step'           => null,
+				'progress'       => 0.0,
+				'files_done'     => 0,
+				'files_total'    => 0,
+				'parts_uploaded' => 0,
+				'started'        => null,
+				'message'        => 'idle',
+				'last_error'     => null,
+			),
+			$status
+		);
+	}
+}
