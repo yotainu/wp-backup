@@ -17,8 +17,8 @@ define( 'WP_PCLOUD_BACKUP_FILE', __FILE__ );
 define( 'WP_PCLOUD_BACKUP_DIR', __DIR__ );
 
 if ( ! defined( 'WP_PCLOUD_BACKUP_UPDATE_URL' ) ) {
-	// Update manifest published from the yotainu/wp-pcloud-backup GitHub repository.
-	define( 'WP_PCLOUD_BACKUP_UPDATE_URL', 'https://raw.githubusercontent.com/yotainu/wp-pcloud-backup/main/update.json' );
+	// Update manifest published from the yotainu/wp-backup GitHub repository.
+	define( 'WP_PCLOUD_BACKUP_UPDATE_URL', 'https://raw.githubusercontent.com/yotainu/wp-backup/main/update.json' );
 }
 
 require_once __DIR__ . '/includes/autoload.php';

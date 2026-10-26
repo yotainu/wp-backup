@@ -92,12 +92,12 @@ WordPress サイトのファイルとデータベースを、定期的に pCloud
 6. 「今すぐバックアップ」で1回手動実行し、pCloud にファイルが届くこと、最後まで完走することを確認します。
 7. まず 2〜3 サイトで数週間運用し、安定したら残りのサイトへ展開します。
 
-### リリース前に必ず `OWNER` を置き換える
+### 配布元リポジトリの URL
 
-リポジトリ内の `OWNER` は GitHub アカウント名の仮置きです。**最初のリリースの前に**、次の2か所を自分のアカウント名に置き換えてください。残っていると、自動更新が存在しない URL を見に行きます。
+配布元は GitHub リポジトリ `yotainu/wp-backup`（リポジトリ名はプラグインのスラッグ `wp-pcloud-backup` と異なります）。別のアカウントやリポジトリで配布する場合は、次の2か所の URL を書き換えてください。残っていると、自動更新が別の URL を見に行きます。
 
-- `update.json` 内の `OWNER`（`download_url`、`sha256_url`、`homepage`）
-- `wp-pcloud-backup.php` の `WP_PCLOUD_BACKUP_UPDATE_URL` の既定値（`https://raw.githubusercontent.com/OWNER/wp-pcloud-backup/main/update.json`）
+- `update.json` の `download_url`、`sha256_url`、`homepage`
+- `wp-pcloud-backup.php` の `WP_PCLOUD_BACKUP_UPDATE_URL` の既定値（`https://raw.githubusercontent.com/yotainu/wp-backup/main/update.json`）
 
 `bin/release.sh` は `git remote` の URL から所有者を読み取って `update.json` を書き換えますが、`wp-pcloud-backup.php` の既定値は置き換えません。こちらは最初に手で直してコミットしておいてください。
 
@@ -145,7 +145,7 @@ define( 'WP_PCLOUD_BACKUP_API_HOST', 'eapi.pcloud.com' );
 |---|---|
 | `WP_PCLOUD_BACKUP_API_HOST` | pCloud の API ホスト。既定は `api.pcloud.com`、EU アカウントは `eapi.pcloud.com` |
 | `WP_PCLOUD_BACKUP_STORAGE_DIR` | 開発モード。pCloud の代わりに、このサーバー上のフォルダへ保存します（本番では使わないでください） |
-| `WP_PCLOUD_BACKUP_UPDATE_URL` | 自動更新の `update.json` の URL。既定は `https://raw.githubusercontent.com/OWNER/wp-pcloud-backup/main/update.json` |
+| `WP_PCLOUD_BACKUP_UPDATE_URL` | 自動更新の `update.json` の URL。既定は `https://raw.githubusercontent.com/yotainu/wp-backup/main/update.json` |
 | `WP_PCLOUD_BACKUP_GITHUB_TOKEN` | GitHub リポジトリを非公開にした場合の読み取りトークン |
 | `WP_PCLOUD_BACKUP_LARGE_FILE_MB` | この大きさ（MB）以上のファイルを、完了メールの警告に載せます。既定 500。`0` で警告しません（[注意](#注意)の「大きなファイル」） |
 
@@ -331,7 +331,7 @@ WP-Cron はサイトにアクセスがないと動きません。アクセスが
 準備:
 
 1. GitHub に `wp-pcloud-backup` リポジトリを作り、`origin` として登録します。
-2. 「リリース前に必ず `OWNER` を置き換える」の2か所を直してコミットします。
+2. 「配布元リポジトリの URL」の2か所が自分のリポジトリを指しているか確認します（既定は `yotainu/wp-backup`）。
 3. `gh auth login` を済ませます。
 
 リリース:
@@ -343,7 +343,7 @@ bin/release.sh 0.1.1 ../notes-0.1.1.md
 - 第1引数はバージョン（`X.Y.Z`）、第2引数は更新内容のメモファイルです（省略すると直前のタグからのコミット履歴で自動生成します）。**メモファイルはリポジトリの外に置く（または `.gitignore` に入れる）**ようにしてください。リポジトリ内の未追跡ファイルがあると「作業ツリーがクリーンでない」として中止されます。
 - `--dry-run` を付けると、ファイルの書き換えと zip の作成までを行い、コミット・タグ・push・GitHub リリースは行いません。確認後は `git checkout -- . && rm -r build` で元に戻します。
 - `main` ブランチ以外からは中止します（意図して別ブランチから出すときだけ `--allow-branch` を付けます）。
-- 次のときは、何も変更せずに中止します: 作業ツリーがクリーンでない / バージョンの形式が `X.Y.Z` でない / タグがローカルまたは GitHub にすでにある / `gh` にログインしていない / `origin` が未設定または `OWNER` のまま / **`wp-pcloud-backup.php` に `OWNER` が残っている**（`--dry-run` のときは最後の2つを許容します）。
+- 次のときは、何も変更せずに中止します: 作業ツリーがクリーンでない / バージョンの形式が `X.Y.Z` でない / タグがローカルまたは GitHub にすでにある / `gh` にログインしていない / `origin` が未設定または GitHub の URL でない / `OWNER` プレースホルダが残っている（`--dry-run` のときは最後の2つを許容します）。
 - スクリプトは `wp-pcloud-backup.php` の `Version:` と `WP_PCLOUD_BACKUP_VERSION`、`readme.txt` の `Stable tag`、`update.json` の `version` / `download_url` / `sha256_url` / `changelog` を書き換え、`build/wp-pcloud-backup.zip`（最上位フォルダ名は `wp-pcloud-backup/`）と `build/wp-pcloud-backup.zip.sha256` を作ります。
 
 公開は次の順に行います。存在しない zip を指す `update.json` を先に公開しないため、`update.json` を含むブランチの push を最後にしています。

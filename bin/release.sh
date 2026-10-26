@@ -90,8 +90,8 @@ else
   PARSED="$(printf '%s' "$REMOTE_URL" | sed -E 's#^.*github\.com[:/]+([^/]+)/([^/]+)$#\1/\2#; s#\.git$##')"
   OWNER="${PARSED%%/*}"
   REPO="${PARSED#*/}"
-  if [ "$PARSED" = "$REMOTE_URL" ] || [ -z "$OWNER" ] || [ "$REPO" != "$PLUGIN" ]; then
-    fail "origin ($REMOTE_URL) must be a GitHub URL of the repository '${PLUGIN}'."
+  if [ "$PARSED" = "$REMOTE_URL" ] || [ -z "$OWNER" ] || [ -z "$REPO" ]; then
+    fail "origin ($REMOTE_URL) must be a GitHub URL (https://github.com/owner/repo or git@github.com:owner/repo)."
   fi
   if [[ "$OWNER" == *OWNER* ]]; then
     fail "origin still contains the OWNER placeholder."
@@ -130,7 +130,9 @@ perl -pi -e 's/^(\s*\*\s*Version:\s*)\S+/${1}$ENV{VERSION}/' "${PLUGIN}.php"
 perl -pi -e "s/(define\\(\\s*'WP_PCLOUD_BACKUP_VERSION',\\s*')[^']*(')/\${1}\$ENV{VERSION}\${2}/" "${PLUGIN}.php"
 perl -pi -e 's/^(Stable tag:\s*).*/${1}$ENV{VERSION}/' readme.txt
 
-BASE="https://github.com/${OWNER}/${PLUGIN}"
+# The GitHub repository name may differ from the plugin slug (e.g. yotainu/wp-backup hosts wp-pcloud-backup).
+REPO="${REPO:-$PLUGIN}"
+BASE="https://github.com/${OWNER}/${REPO}"
 export BASE
 perl -MJSON::PP -0pi -e '
   my $base = "$ENV{BASE}/releases/download/$ENV{TAG}/$ENV{PLUGIN}.zip";
