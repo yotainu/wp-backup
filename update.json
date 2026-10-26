@@ -1,8 +1,8 @@
 {
 	"version": "0.1.0",
-	"download_url": "https://github.com/OWNER/wp-pcloud-backup/releases/download/v0.1.0/wp-pcloud-backup.zip",
-	"sha256_url": "https://github.com/OWNER/wp-pcloud-backup/releases/download/v0.1.0/wp-pcloud-backup.zip.sha256",
-	"homepage": "https://github.com/OWNER/wp-pcloud-backup",
+	"download_url": "https://github.com/yotainu/wp-pcloud-backup/releases/download/v0.1.0/wp-pcloud-backup.zip",
+	"sha256_url": "https://github.com/yotainu/wp-pcloud-backup/releases/download/v0.1.0/wp-pcloud-backup.zip.sha256",
+	"homepage": "https://github.com/yotainu/wp-pcloud-backup",
 	"requires": "6.0",
 	"requires_php": "7.4",
 	"tested": "6.8",
